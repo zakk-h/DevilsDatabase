@@ -170,13 +170,13 @@ class HashEqJoinPop(JoinPop['HashEqJoinPop.CompiledProps']):
 
             for rowL in bucket.iter_scan():
                 for rowR in rightFile.iter_scan():
-                    if self.compiled.eq_exec.eval(rowL, rowR) == 0:
+                    if self.compiled.eq_exec.eval(this=rowL, that=rowR) == 0:
                         yield (*rowL, *rowR)
 
         return
     
     def execute_recurse(self, num_memory_blocks, dataL, dataR, row_sizeL, row_sizeR, keyL, keyR, depth):
-        
+         
         readerL = BufferedReader(num_memory_blocks)
         readerR = BufferedReader(num_memory_blocks)
         mod = (num_memory_blocks-1)*(num_memory_blocks-2)**depth
