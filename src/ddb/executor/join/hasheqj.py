@@ -157,35 +157,23 @@ class HashEqJoinPop(JoinPop['HashEqJoinPop.CompiledProps']):
         # THIS IS WHERE YOUR IMPLEMENTATION SHOULD GO
         # but feel free to define other helper methods in this class as you see fit
 
-        def execute_recurse(num_memory_blocks, depth):
-            writer = BufferedWriter(num_memory_blocks)
-            reader = BufferedReader(num_memory_blocks)
-            for buffer in reader.iter_buffer(reader.left.execute()):
-                print()
-                
-                if depth == DEFAULT_HASH_MAX_DEPTH: return
+        def partition_side(input, side, depth):
+            mod = self.num_memory_blocks - 1 if depth == 0 else self.num_memory_blocks-2
+            partitions = [self._tmp_partition_file(side, depth, i) for i in range(mod)]
+            for buffer in input.iter_buffer(input.execute()):
+                for row in buffer:
+                    key = self.compiled.left_join_vals_exec.execute(row) if side == "left" else self.compiled.right_join_vals_exec.execute(row)
+                    hash_location = self.hash(key) % (mod)
+                    partitions[hash_location].write(row)
+            return partitions
 
-                for partition_id in range(something):
-                    left_partition = self._tmp_partition_file('left', depth, partition_id)
-                    right_partition = self._tmp_partition_file('right', depth, partition_id)
-                    # we need to read the data from the input and write it to the partition:
-                    for buffer in reader.iter_buffer(reader.left.execute()):
-                        for row in buffer:
-                            left_partition.write(row)
-                    for buffer in reader.iter_buffer(reader.right.execute()):
-                        for row in buffer:
-                            right_partition.write(row)
-                    # we need to recurse:
-                    if depth < DEFAULT_HASH_MAX_DEPTH:
-                        execute_recurse(num_memory_blocks, left_partition, depth+1)
-                        execute_recurse(num_memory_blocks, right_partition, depth+1)
-
-
-        M = self.num_memory_blocks
-        N = M-1
-
-        execute_recurse(self.num_memory_blocks, self.left, DEFAULT_HASH_MAX_DEPTH)
-        execute_recurse(self.num_memory_blocks, self.right, DEFAULT_HASH_MAX_DEPTH)
+        def execute_recurse(num_memory_blocks, left_feed, right_feed, depth):
+            left_partitions = partition_side(left_feed, 'left', depth)
+            right_partitions = partition_side(right_feed, 'right', depth)
+            # check if buckets are too full and call partition again on that bucket in the left and right table
+            
+        execute_recurse(self.num_memory_blocks, self.left.execute(), 0)
+        execute_recurse(self.num_memory_blocks, self.left.execute(), 0)
         yield from ()
         return
     
