@@ -146,9 +146,9 @@ class HashEqJoinPop(JoinPop['HashEqJoinPop.CompiledProps']):
         x = ((x >> 16) ^ x) * 0x45d9f3b
         x = ((x >> 16) ^ x) * 0x45d9f3b
         x = (x >> 16) ^ x
-        return x
+        # return x
         # a more heavy-weight alternative:
-        # return int.from_bytes(hashlib.sha256(str(v).encode('utf-8')).digest(), 'big')
+        return int.from_bytes(hashlib.sha256(str(v).encode('utf-8')).digest(), 'big')
 
     @profile_generator()
     def execute(self) -> Generator[tuple, None, None]:
