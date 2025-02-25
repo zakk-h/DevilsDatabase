@@ -155,6 +155,7 @@ class HashEqJoinPop(JoinPop['HashEqJoinPop.CompiledProps']):
     def execute(self) -> Generator[tuple, None, None]:
         # THIS IS WHERE YOUR IMPLEMENTATION SHOULD GO
         # but feel free to define other helper methods in this class as you see fit
+<<<<<<< HEAD
         M = self.num_memory_blocks
         N = M-1
         keyLeft = self.compiled.left_join_vals_exec
@@ -172,6 +173,34 @@ class HashEqJoinPop(JoinPop['HashEqJoinPop.CompiledProps']):
                 for rowR in rightFile.iter_scan():
                     yield (*rowL, *rowR)
 
+=======
+
+        def partition_side(input, side, depth):
+            mod = self.num_memory_blocks - 1 if depth == 0 else self.num_memory_blocks-2
+            partitions = [self._tmp_partition_file(side, depth, i) for i in range(mod)] # list of heapfiles, heapfiles stored on disk, using system storage manager, params give eficient organization and retrieval
+            for buffer in input.iter_buffer(input.execute()): # going over this iterable of tuples in batches, less trips to disk as opposed to just execute that is one at a time
+                for row in buffer:
+                    key = self.compiled.left_join_vals_exec.eval(row) if side == "left" else self.compiled.right_join_vals_exec.eval(row) # extracts the join key values
+                    hash_location = self.hash(key) % (mod)
+                    partitions[hash_location].write(row)
+            return partitions
+
+        def execute_recurse(num_memory_blocks, left_feed, right_feed, depth):
+            left_partitions = partition_side(left_feed, 'left', depth)
+            right_partitions = partition_side(right_feed, 'right', depth)
+            # check if buckets are too full and call partition again on that bucket in the left and right table
+            mod = self.num_memory_blocks - 1 if depth == 0 else self.num_memory_blocks-2
+            if depth < DEFAULT_HASH_MAX_DEPTH:
+                for i in range(left_partitions.size()):
+                    block_heapfile = left_partitions[i] # can call stat on heapfiles to get size, etc, is dictionary
+                    block_heapfile.stat()
+                    
+
+            
+        execute_recurse(self.num_memory_blocks, self.left, 0) # execute yields a rows individually as an iterable of tuples, memory efficient, buffered reading
+        execute_recurse(self.num_memory_blocks, self.left, 0)
+        yield from ()
+>>>>>>> c68b5b70e6c9af95c7f9d9f86a224398917b0b87
         return
     
     def execute_recurse(self, num_memory_blocks, dataL, dataR, row_sizeL, row_sizeR, keyL, keyR, depth):
