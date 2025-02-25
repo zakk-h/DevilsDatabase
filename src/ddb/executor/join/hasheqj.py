@@ -13,7 +13,7 @@ from ...primitives import CompiledValExpr
 from ...storage import HeapFile
 from ...globals import BLOCK_SIZE, DEFAULT_HASH_MAX_DEPTH
 
-from ..util import BufferedWriter
+from ..util import BufferedWriter, BufferedReader
 from ..interface import QPop
 
 from .interface import JoinPop
@@ -156,5 +156,16 @@ class HashEqJoinPop(JoinPop['HashEqJoinPop.CompiledProps']):
         # but feel free to define other helper methods in this class as you see fit
         M = self.num_memory_blocks
         N = M-1
+        
+        
+       
         yield from ()
         return
+    
+    def execute_recurse(num_memory_blocks, bucket, MAX_HASH_MAX_DEPTH):
+        # one memory block to buffer writes to each output partition file
+        writer = BufferedWriter(num_memory_blocks)
+        # one to buffer reads from the input partition file
+        reader = BufferedReader(num_memory_blocks)
+
+        
