@@ -179,14 +179,14 @@ class HashEqJoinPop(JoinPop['HashEqJoinPop.CompiledProps']):
         
         readerL = BufferedReader(num_memory_blocks)
         readerR = BufferedReader(num_memory_blocks)
-        mod = (num_memory_blocks-1) if depth == 0 else (num_memory_blocks-2)
+        mod = (num_memory_blocks-1)*(num_memory_blocks-2)**depth
         bucketsL = [self._tmp_partition_file("left", depth, x) for x in range(mod)]
         bucketsR = [self._tmp_partition_file("right", depth, x) for x in range(mod)]
 
 
         for buffed in readerL.iter_buffer(dataL):
             for row in buffed:
-                hashed = (hash(keyL.eval(row)) % mod) + depth*num_memory_blocks
+                hashed = hash(keyL.eval(row)) % mod
                 bucketsL[hashed].write(row)
 
         for buffed in readerR.iter_buffer(dataR):
