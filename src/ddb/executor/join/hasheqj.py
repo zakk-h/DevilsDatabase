@@ -160,7 +160,7 @@ class HashEqJoinPop(JoinPop['HashEqJoinPop.CompiledProps']):
         def partition_side(input, side, depth):
             mod = self.num_memory_blocks - 1 if depth == 0 else self.num_memory_blocks-2
             partitions = [self._tmp_partition_file(side, depth, i) for i in range(mod)]
-            for buffer in input.iter_buffer(input.execute()):
+            for buffer in input.iter_buffer(input):
                 for row in buffer:
                     key = self.compiled.left_join_vals_exec.execute(row) if side == "left" else self.compiled.right_join_vals_exec.execute(row)
                     hash_location = self.hash(key) % (mod)
