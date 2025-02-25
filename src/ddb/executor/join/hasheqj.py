@@ -154,5 +154,7 @@ class HashEqJoinPop(JoinPop['HashEqJoinPop.CompiledProps']):
     def execute(self) -> Generator[tuple, None, None]:
         # THIS IS WHERE YOUR IMPLEMENTATION SHOULD GO
         # but feel free to define other helper methods in this class as you see fit
+        M = self.num_memory_blocks
+        N = M-1
         yield from ()
         return
