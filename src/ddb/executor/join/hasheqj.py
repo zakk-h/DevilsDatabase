@@ -159,10 +159,10 @@ class HashEqJoinPop(JoinPop['HashEqJoinPop.CompiledProps']):
 
         def partition_side(input, side, depth):
             mod = self.num_memory_blocks - 1 if depth == 0 else self.num_memory_blocks-2
-            partitions = [self._tmp_partition_file(side, depth, i) for i in range(mod)]
-            for buffer in input.iter_buffer(input):
+            partitions = [self._tmp_partition_file(side, depth, i) for i in range(mod)] # list of heapfiles, heapfiles stored on disk, using system storage manager, params give eficient organization and retrieval
+            for buffer in input.iter_buffer(input): # going over this iterable of tuples in batches, less trips to disk
                 for row in buffer:
-                    key = self.compiled.left_join_vals_exec.execute(row) if side == "left" else self.compiled.right_join_vals_exec.execute(row)
+                    key = self.compiled.left_join_vals_exec.eval(row) if side == "left" else self.compiled.right_join_vals_exec.eval(row) # extracts the join key values
                     hash_location = self.hash(key) % (mod)
                     partitions[hash_location].write(row)
             return partitions
@@ -172,7 +172,7 @@ class HashEqJoinPop(JoinPop['HashEqJoinPop.CompiledProps']):
             right_partitions = partition_side(right_feed, 'right', depth)
             # check if buckets are too full and call partition again on that bucket in the left and right table
             
-        execute_recurse(self.num_memory_blocks, self.left.execute(), 0)
+        execute_recurse(self.num_memory_blocks, self.left.execute(), 0) # execute yields a rows individually as an iterable of tuples, memory efficient, buffered reading
         execute_recurse(self.num_memory_blocks, self.left.execute(), 0)
         yield from ()
         return
