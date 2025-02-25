@@ -1,6 +1,7 @@
 from typing import cast, Final, Iterable, Generator, Any
 from dataclasses import dataclass
 from functools import cached_property
+from contextlib import closing
 import logging
 import ctypes
 import hashlib
@@ -150,45 +151,74 @@ class HashEqJoinPop(JoinPop['HashEqJoinPop.CompiledProps']):
         # a more heavy-weight alternative:
         return int.from_bytes(hashlib.sha256(str(v).encode('utf-8')).digest(), 'big')
 
-        # for inner_buffer in reader.iter_buffer(reader.right.execute()):
-
     @profile_generator()
     def execute(self) -> Generator[tuple, None, None]:
         # THIS IS WHERE YOUR IMPLEMENTATION SHOULD GO
         # but feel free to define other helper methods in this class as you see fit
-
-        def execute_recurse(num_memory_blocks, depth):
-            writer = BufferedWriter(num_memory_blocks)
-            reader = BufferedReader(num_memory_blocks)
-            for buffer in reader.iter_buffer(reader.left.execute()):
-                print()
-                
-                if depth == DEFAULT_HASH_MAX_DEPTH: return
-
-                for partition_id in range(something):
-                    left_partition = self._tmp_partition_file('left', depth, partition_id)
-                    right_partition = self._tmp_partition_file('right', depth, partition_id)
-                    # we need to read the data from the input and write it to the partition:
-                    for buffer in reader.iter_buffer(reader.left.execute()):
-                        for row in buffer:
-                            left_partition.write(row)
-                    for buffer in reader.iter_buffer(reader.right.execute()):
-                        for row in buffer:
-                            right_partition.write(row)
-                    # we need to recurse:
-                    if depth < DEFAULT_HASH_MAX_DEPTH:
-                        execute_recurse(num_memory_blocks, left_partition, depth+1)
-                        execute_recurse(num_memory_blocks, right_partition, depth+1)
-
-
         M = self.num_memory_blocks
         N = M-1
+        keyLeft = self.compiled.left_join_vals_exec
+        keyRight = self.compiled.right_join_vals_exec
 
-        execute_recurse(self.num_memory_blocks, self.left, DEFAULT_HASH_MAX_DEPTH)
-        execute_recurse(self.num_memory_blocks, self.right, DEFAULT_HASH_MAX_DEPTH)
-        yield from ()
+
+        splitL, splitR = self.execute_recurse(self.num_memory_blocks, self.left.execute(), self.right.execute(), self.left.estimated.stats.row_size, self.right.estimated.stats.row_size, keyLeft, keyRight, 0)
+        
+        for bucket in splitL:
+            nm = bucket.name.split('-')
+            rightFile = self.context.sm.heap_file(self.context.tmp_tx, f'.tmp-{nm[1]}-right-{nm[3]}-{nm[4]}', [], create_if_not_exists=False)
+
+
+            for rowL in bucket.iter_scan():
+                for rowR in rightFile.iter_scan():
+                    yield (*rowL, *rowR)
+
         return
     
-    
+    def execute_recurse(self, num_memory_blocks, dataL, dataR, row_sizeL, row_sizeR, keyL, keyR, depth):
+        
+        readerL = BufferedReader(num_memory_blocks)
+        readerR = BufferedReader(num_memory_blocks)
+        mod = (num_memory_blocks-1) if depth == 0 else (num_memory_blocks-2)
+        bucketsL = [self._tmp_partition_file("left", depth, x) for x in range(mod)]
+        bucketsR = [self._tmp_partition_file("right", depth, x) for x in range(mod)]
 
 
+        for buffed in readerL.iter_buffer(dataL):
+            for row in buffed:
+                hashed = (hash(keyL.eval(row)) % mod) + depth*num_memory_blocks
+                bucketsL[hashed].write(row)
+
+        for buffed in readerR.iter_buffer(dataR):
+            for row in buffed:
+                hashed = hash(keyR.eval(row)) % mod
+                bucketsR[hashed].write(row)
+
+        newbucketsL = bucketsL
+        newbucketsR = bucketsR
+
+        for bucket in newbucketsL:
+            numRows = bucket.stat["entries"]
+            if numRows*row_sizeL > BLOCK_SIZE*(num_memory_blocks-1):
+                nm = bucket.name.split('-')
+                rDataNew = self.context.sm.heap_file(self.context.tmp_tx, f'.tmp-{nm[1]}-right-{nm[3]}-{nm[4]}', [], create_if_not_exists=False)
+                newbucketsL, newbucketsR = self.execute_recurse(num_memory_blocks, bucket.iter_scan(), rDataNew, row_sizeL, row_sizeR, keyL, keyR, depth+1)
+                break
+
+        for bucket in newbucketsR:
+            numRows = bucket.stat["entries"]
+            if numRows*row_sizeR > BLOCK_SIZE*(num_memory_blocks-1):
+                nm = bucket.name.split('-')
+                lDataNew = self.context.sm.heap_file(self.context.tmp_tx, f'.tmp-{nm[1]}-left-{nm[3]}-{nm[4]}', [], create_if_not_exists=False)
+                newbucketsL, newbucketsR = self.execute_recurse(num_memory_blocks, bucket.iter_scan(), lDataNew, row_sizeL, row_sizeR, keyL, keyR, depth+1)
+                break
+
+        return newbucketsL, newbucketsR
+
+
+
+# 10
+# 11
+# 00
+# 01
+
+# 010
