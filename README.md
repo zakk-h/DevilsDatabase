@@ -1,6 +1,6 @@
 # Devil's DataBase (`ddb`)
 
-# Zakk Heile, Judy He, Riya Manchanda
+# Zakk Heile, Judy He, Riya Manchanda - Duke University
 
 We assume you are in your course container shell. If you have a different setup, your mileage may vary: at the very least you will need `make` and Python (>= 3.11) with `poetry`.
 
