@@ -170,7 +170,8 @@ class HashEqJoinPop(JoinPop['HashEqJoinPop.CompiledProps']):
 
             for rowL in bucket.iter_scan():
                 for rowR in rightFile.iter_scan():
-                    yield (*rowL, *rowR)
+                    if self.compiled.eq_exec.eval(rowL, rowR) == 0:
+                        yield (*rowL, *rowR)
 
         return
     
@@ -199,26 +200,14 @@ class HashEqJoinPop(JoinPop['HashEqJoinPop.CompiledProps']):
         for bucket in newbucketsL:
             numRows = bucket.stat["entries"]
             if numRows*row_sizeL > BLOCK_SIZE*(num_memory_blocks-1):
-                nm = bucket.name.split('-')
-                rDataNew = self.context.sm.heap_file(self.context.tmp_tx, f'.tmp-{nm[1]}-right-{nm[3]}-{nm[4]}', [], create_if_not_exists=False)
-                newbucketsL, newbucketsR = self.execute_recurse(num_memory_blocks, bucket.iter_scan(), rDataNew, row_sizeL, row_sizeR, keyL, keyR, depth+1)
+                newbucketsL, newbucketsR = self.execute_recurse(num_memory_blocks, dataL, dataR, row_sizeL, row_sizeR, keyL, keyR, depth+1)
                 break
 
         for bucket in newbucketsR:
             numRows = bucket.stat["entries"]
             if numRows*row_sizeR > BLOCK_SIZE*(num_memory_blocks-1):
-                nm = bucket.name.split('-')
-                lDataNew = self.context.sm.heap_file(self.context.tmp_tx, f'.tmp-{nm[1]}-left-{nm[3]}-{nm[4]}', [], create_if_not_exists=False)
-                newbucketsL, newbucketsR = self.execute_recurse(num_memory_blocks, bucket.iter_scan(), lDataNew, row_sizeL, row_sizeR, keyL, keyR, depth+1)
+                newbucketsL, newbucketsR = self.execute_recurse(num_memory_blocks, dataL, dataR, row_sizeL, row_sizeR, keyL, keyR, depth+1)
                 break
 
         return newbucketsL, newbucketsR
 
-
-
-# 10
-# 11
-# 00
-# 01
-
-# 010
