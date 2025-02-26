@@ -166,48 +166,60 @@ class HashEqJoinPop(JoinPop['HashEqJoinPop.CompiledProps']):
         for bucket in splitL:
             nm = bucket.name.split('-')
             rightFile = self.context.sm.heap_file(self.context.tmp_tx, f'.tmp-{nm[1]}-right-{nm[3]}-{nm[4]}', [], create_if_not_exists=False)
-
+ 
 
             for rowL in bucket.iter_scan():
                 for rowR in rightFile.iter_scan():
-                    if self.compiled.eq_exec.eval(this=rowL, that=rowR) == 0:
+
+                    if self.compiled.eq_exec.eval(this=rowL, that=rowR):
+
                         yield (*rowL, *rowR)
 
         return
     
     def execute_recurse(self, num_memory_blocks, dataL, dataR, row_sizeL, row_sizeR, keyL, keyR, depth):
+
+        if depth > DEFAULT_HASH_MAX_DEPTH:
+            return None, None
          
         readerL = BufferedReader(num_memory_blocks)
         readerR = BufferedReader(num_memory_blocks)
         mod = (num_memory_blocks-1)*(num_memory_blocks-2)**depth
         bucketsL = [self._tmp_partition_file("left", depth, x) for x in range(mod)]
         bucketsR = [self._tmp_partition_file("right", depth, x) for x in range(mod)]
+        writersL = [BufferedWriter(fl, 1) for fl in bucketsL]
+        writersR = [BufferedWriter(fl, 1) for fl in bucketsR]
 
 
         for buffed in readerL.iter_buffer(dataL):
             for row in buffed:
-                hashed = hash(keyL.eval(row)) % mod
-                bucketsL[hashed].write(row)
+                hashed = self.hash(keyL.eval(this=row, that=row)) % mod
+                writersL[hashed].write(row)
 
         for buffed in readerR.iter_buffer(dataR):
             for row in buffed:
-                hashed = hash(keyR.eval(row)) % mod
-                bucketsR[hashed].write(row)
-
+                hashed = self.hash(keyR.eval(this=row, that=row)) % mod
+                writersR[hashed].write(row)
+ 
         newbucketsL = bucketsL
         newbucketsR = bucketsR
 
+        found = False
+
         for bucket in newbucketsL:
-            numRows = bucket.stat["entries"]
+            numRows = bucket.stat()["entries"]
             if numRows*row_sizeL > BLOCK_SIZE*(num_memory_blocks-1):
-                newbucketsL, newbucketsR = self.execute_recurse(num_memory_blocks, dataL, dataR, row_sizeL, row_sizeR, keyL, keyR, depth+1)
+                found = True
                 break
 
         for bucket in newbucketsR:
-            numRows = bucket.stat["entries"]
+            numRows = bucket.stat()["entries"]
             if numRows*row_sizeR > BLOCK_SIZE*(num_memory_blocks-1):
-                newbucketsL, newbucketsR = self.execute_recurse(num_memory_blocks, dataL, dataR, row_sizeL, row_sizeR, keyL, keyR, depth+1)
+                found = True
                 break
+
+        if found:
+            newbucketsL, newbucketsR = self.execute_recurse(num_memory_blocks, dataL, dataR, row_sizeL, row_sizeR, keyL, keyR, depth+1)
 
         return newbucketsL, newbucketsR
 
