@@ -201,6 +201,11 @@ class HashEqJoinPop(JoinPop['HashEqJoinPop.CompiledProps']):
                 hashed = self.hash(keyR.eval(this=row, that=row)) % mod
                 writersR[hashed].write(row)
  
+        for w in writersL:
+            w.flush()
+        for w in writersR:
+            w.flush()
+
         newbucketsL = bucketsL
         newbucketsR = bucketsR
 
