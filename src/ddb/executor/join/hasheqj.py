@@ -155,51 +155,54 @@ class HashEqJoinPop(JoinPop['HashEqJoinPop.CompiledProps']):
     def execute(self) -> Generator[tuple, None, None]:
         # THIS IS WHERE YOUR IMPLEMENTATION SHOULD GO
         # but feel free to define other helper methods in this class as you see fit
-        M = self.num_memory_blocks
-        N = M-1
         keyLeft = self.compiled.left_join_vals_exec
         keyRight = self.compiled.right_join_vals_exec
 
 
-        splitL, splitR = self.execute_recurse(self.num_memory_blocks, self.left.execute(), self.right.execute(), self.left.estimated.stats.row_size, self.right.estimated.stats.row_size, keyLeft, keyRight, 0)
+        splitL, splitR = self.execute_recurse(self.num_memory_blocks, [self.left.execute()], [self.right.execute()], self.left.estimated.stats.row_size, self.right.estimated.stats.row_size, keyLeft, keyRight, 0)
         
-        for bucket in splitL:
-            nm = bucket.name.split('-')
-            rightFile = self.context.sm.heap_file(self.context.tmp_tx, f'.tmp-{nm[1]}-right-{nm[3]}-{nm[4]}', [], create_if_not_exists=False)
- 
-
-            for rowL in bucket.iter_scan():
-                for rowR in rightFile.iter_scan():
-
-                    if self.compiled.eq_exec.eval(this=rowL, that=rowR):
-
-                        yield (*rowL, *rowR)
+        reader = BufferedReader(self.num_memory_blocks)
+        for i in range(len(splitL)):
+            # Open the corresponding left and right bucket files on demand.
+            with splitL[i] as left_bucket, splitR[i] as right_bucket:
+                for left_buffer in reader.iter_buffer(left_bucket.iter_scan()):
+                    for rowL in left_buffer:
+                        for right_buffer in reader.iter_buffer(right_bucket.iter_scan()):
+                            for rowR in right_buffer:
+                                if self.compiled.eq_exec.eval(this=rowL, that=rowR):
+                                    yield (*rowL, *rowR)
 
         return
     
-    def execute_recurse(self, num_memory_blocks, dataL, dataR, row_sizeL, row_sizeR, keyL, keyR, depth):
+    def execute_recurse(self, num_memory_blocks, partitionsL, partitionsR, row_sizeL, row_sizeR, keyL, keyR, depth):
 
         if depth > DEFAULT_HASH_MAX_DEPTH:
             return None, None
          
         readerL = BufferedReader(num_memory_blocks)
         readerR = BufferedReader(num_memory_blocks)
-        mod = (num_memory_blocks-1)*(num_memory_blocks-2)**depth
+        mod = (num_memory_blocks)*(num_memory_blocks-1)**depth
         bucketsL = [self._tmp_partition_file("left", depth, x) for x in range(mod)]
         bucketsR = [self._tmp_partition_file("right", depth, x) for x in range(mod)]
         writersL = [BufferedWriter(fl, 1) for fl in bucketsL]
         writersR = [BufferedWriter(fl, 1) for fl in bucketsR]
 
 
-        for buffed in readerL.iter_buffer(dataL):
-            for row in buffed:
-                hashed = self.hash(keyL.eval(this=row, that=row)) % mod
-                writersL[hashed].write(row)
+        for partition in partitionsL:
+            if isinstance(partition, HeapFile):
+                partition = partition.iter_scan()
+            for buffed in readerL.iter_buffer(partition):
+                for row in buffed:
+                    hashed = self.hash(keyL.eval(this=row, that=row)) % mod
+                    writersL[hashed].write(row)
 
-        for buffed in readerR.iter_buffer(dataR):
-            for row in buffed:
-                hashed = self.hash(keyR.eval(this=row, that=row)) % mod
-                writersR[hashed].write(row)
+        for partition in partitionsR:
+            if isinstance(partition, HeapFile):
+                partition = partition.iter_scan()
+            for buffed in readerR.iter_buffer(partition):
+                for row in buffed:
+                    hashed = self.hash(keyR.eval(this=row, that=row)) % mod
+                    writersR[hashed].write(row)
  
         for w in writersL:
             w.flush()
@@ -224,7 +227,10 @@ class HashEqJoinPop(JoinPop['HashEqJoinPop.CompiledProps']):
                 break
 
         if found:
-            newbucketsL, newbucketsR = self.execute_recurse(num_memory_blocks, dataL, dataR, row_sizeL, row_sizeR, keyL, keyR, depth+1)
+            for partition in partitionsL + partitionsR:
+                if isinstance(partition, HeapFile):
+                    partition._close()
+            newbucketsL, newbucketsR = self.execute_recurse(num_memory_blocks, bucketsL, bucketsR, row_sizeL, row_sizeR, keyL, keyR, depth+1)
 
         return newbucketsL, newbucketsR
 
