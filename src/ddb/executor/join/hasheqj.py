@@ -153,14 +153,18 @@ class HashEqJoinPop(JoinPop['HashEqJoinPop.CompiledProps']):
 
     @profile_generator()
     def execute(self) -> Generator[tuple, None, None]:
-        # THIS IS WHERE YOUR IMPLEMENTATION SHOULD GO
-        # but feel free to define other helper methods in this class as you see fit
         keyLeft = self.compiled.left_join_vals_exec
         keyRight = self.compiled.right_join_vals_exec
 
+        splitL, splitR = self.execute_recurse(
+            self.num_memory_blocks, 
+            [self.left.execute()], 
+            [self.right.execute()], 
+            self.left.estimated.stats.row_size, 
+            self.right.estimated.stats.row_size, 
+            keyLeft, keyRight, 2
+        )
 
-        splitL, splitR = self.execute_recurse(self.num_memory_blocks, [self.left.execute()], [self.right.execute()], self.left.estimated.stats.row_size, self.right.estimated.stats.row_size, keyLeft, keyRight, 0)
-        
         reader = BufferedReader(self.num_memory_blocks)
         for i in range(len(splitL)):
             with splitL[i] as left_bucket, splitR[i] as right_bucket:
@@ -170,66 +174,77 @@ class HashEqJoinPop(JoinPop['HashEqJoinPop.CompiledProps']):
                             for rowR in right_buffer:
                                 if self.compiled.eq_exec.eval(this=rowL, that=rowR):
                                     yield (*rowL, *rowR)
-
         return
+
     
     def execute_recurse(self, num_memory_blocks, partitionsL, partitionsR, row_sizeL, row_sizeR, keyL, keyR, depth):
-
         if depth > DEFAULT_HASH_MAX_DEPTH:
-            return None, None
-         
+            return partitionsL, partitionsR
+
         readerL = BufferedReader(num_memory_blocks)
         readerR = BufferedReader(num_memory_blocks)
-        mod = (num_memory_blocks)*(num_memory_blocks-1)**depth
+        mod = 1024
         bucketsL = [self._tmp_partition_file("left", depth, x) for x in range(mod)]
         bucketsR = [self._tmp_partition_file("right", depth, x) for x in range(mod)]
         writersL = [BufferedWriter(fl, 1) for fl in bucketsL]
         writersR = [BufferedWriter(fl, 1) for fl in bucketsR]
 
+        # Partition left side
+        for i in range(len(partitionsL)):
+            if isinstance(partitionsL[i], HeapFile):
+                with partitionsL[i] as p1:
+                    partition = p1.iter_scan()
+                    for buffed in readerL.iter_buffer(partition):
+                        for row in buffed:
+                            hashed = self.hash(keyL.eval(this=row, that=row)) % mod
+                            writersL[hashed].write(row)
+                            writersL[hashed].flush()  
 
-        for partition in partitionsL:
-            if isinstance(partition, HeapFile):
-                partition = partition.iter_scan()
-            for buffed in readerL.iter_buffer(partition):
-                for row in buffed:
-                    hashed = self.hash(keyL.eval(this=row, that=row)) % mod
-                    writersL[hashed].write(row)
+            else:
+                for buffed in readerL.iter_buffer(partitionsL[i]):
+                    for row in buffed:
+                        hashed = self.hash(keyL.eval(this=row, that=row)) % mod
+                        writersL[hashed].write(row)
+                        writersL[hashed].flush()
 
-        for partition in partitionsR:
-            if isinstance(partition, HeapFile):
-                partition = partition.iter_scan()
-            for buffed in readerR.iter_buffer(partition):
-                for row in buffed:
-                    hashed = self.hash(keyR.eval(this=row, that=row)) % mod
-                    writersR[hashed].write(row)
- 
-        for w in writersL:
-            w.flush()
-        for w in writersR:
-            w.flush()
+        # Partition right side
+        for i in range(len(partitionsR)):
+            if isinstance(partitionsR[i], HeapFile):
+                with partitionsR[i] as p1:
+                    partition = p1.iter_scan()
+                    for buffed in readerR.iter_buffer(partition):
+                        for row in buffed:
+                            hashed = self.hash(keyR.eval(this=row, that=row)) % mod
+                            writersR[hashed].write(row)
+                            writersR[hashed].flush()  
 
-        newbucketsL = bucketsL
-        newbucketsR = bucketsR
-
+            else:
+                for buffed in readerR.iter_buffer(partitionsR[i]):
+                    for row in buffed:
+                        hashed = self.hash(keyR.eval(this=row, that=row)) % mod
+                        writersR[hashed].write(row)
+                        writersR[hashed].flush()
+    
         found = False
-
-        for bucket in newbucketsL:
+        for bucket in bucketsL:
             numRows = bucket.stat()["entries"]
-            if numRows*row_sizeL > BLOCK_SIZE*(num_memory_blocks-1):
+            if numRows * row_sizeL > BLOCK_SIZE * (num_memory_blocks - 1):
                 found = True
                 break
 
-        for bucket in newbucketsR:
+        for bucket in bucketsR:
             numRows = bucket.stat()["entries"]
-            if numRows*row_sizeR > BLOCK_SIZE*(num_memory_blocks-1):
+            if numRows * row_sizeR > BLOCK_SIZE * (num_memory_blocks - 1):
                 found = True
                 break
 
         if found:
-            for partition in partitionsL + partitionsR:
-                if isinstance(partition, HeapFile):
-                    partition._close()
-            if depth < DEFAULT_HASH_MAX_DEPTH: newbucketsL, newbucketsR = self.execute_recurse(num_memory_blocks, bucketsL, bucketsR, row_sizeL, row_sizeR, keyL, keyR, depth+1)
+            tempL, tempR = self.execute_recurse(
+                num_memory_blocks, bucketsL, bucketsR, row_sizeL, row_sizeR, keyL, keyR, depth+1
+            )
+            if tempL and tempR:
+                newbucketsL, newbucketsR = tempL, tempR 
+        else:
+            newbucketsL, newbucketsR = bucketsL, bucketsR
 
         return newbucketsL, newbucketsR
-
