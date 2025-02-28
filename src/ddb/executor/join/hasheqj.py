@@ -162,10 +162,11 @@ class HashEqJoinPop(JoinPop['HashEqJoinPop.CompiledProps']):
             [self.right.execute()], 
             self.left.estimated.stats.row_size, 
             self.right.estimated.stats.row_size, 
-            keyLeft, keyRight, 2
+            keyLeft, keyRight, 0
         )
 
         reader = BufferedReader(self.num_memory_blocks)
+
         for i in range(len(splitL)):
             with splitL[i] as left_bucket, splitR[i] as right_bucket:
                 for left_buffer in reader.iter_buffer(left_bucket.iter_scan()):
@@ -174,8 +175,7 @@ class HashEqJoinPop(JoinPop['HashEqJoinPop.CompiledProps']):
                             for rowR in right_buffer:
                                 if self.compiled.eq_exec.eval(this=rowL, that=rowR):
                                     yield (*rowL, *rowR)
-        return
-
+        
     
     def execute_recurse(self, num_memory_blocks, partitionsL, partitionsR, row_sizeL, row_sizeR, keyL, keyR, depth):
         if depth > DEFAULT_HASH_MAX_DEPTH:
@@ -183,13 +183,12 @@ class HashEqJoinPop(JoinPop['HashEqJoinPop.CompiledProps']):
 
         readerL = BufferedReader(num_memory_blocks)
         readerR = BufferedReader(num_memory_blocks)
-        mod = 1024
+        mod = (num_memory_blocks) * (num_memory_blocks - 1) ** depth
         bucketsL = [self._tmp_partition_file("left", depth, x) for x in range(mod)]
         bucketsR = [self._tmp_partition_file("right", depth, x) for x in range(mod)]
         writersL = [BufferedWriter(fl, 1) for fl in bucketsL]
         writersR = [BufferedWriter(fl, 1) for fl in bucketsR]
 
-        # Partition left side
         for i in range(len(partitionsL)):
             if isinstance(partitionsL[i], HeapFile):
                 with partitionsL[i] as p1:
@@ -198,8 +197,7 @@ class HashEqJoinPop(JoinPop['HashEqJoinPop.CompiledProps']):
                         for row in buffed:
                             hashed = self.hash(keyL.eval(this=row, that=row)) % mod
                             writersL[hashed].write(row)
-                            writersL[hashed].flush()  
-
+                            writersL[hashed].flush()
             else:
                 for buffed in readerL.iter_buffer(partitionsL[i]):
                     for row in buffed:
@@ -207,7 +205,7 @@ class HashEqJoinPop(JoinPop['HashEqJoinPop.CompiledProps']):
                         writersL[hashed].write(row)
                         writersL[hashed].flush()
 
-        # Partition right side
+        
         for i in range(len(partitionsR)):
             if isinstance(partitionsR[i], HeapFile):
                 with partitionsR[i] as p1:
@@ -216,15 +214,18 @@ class HashEqJoinPop(JoinPop['HashEqJoinPop.CompiledProps']):
                         for row in buffed:
                             hashed = self.hash(keyR.eval(this=row, that=row)) % mod
                             writersR[hashed].write(row)
-                            writersR[hashed].flush()  
-
+                            writersR[hashed].flush()
             else:
                 for buffed in readerR.iter_buffer(partitionsR[i]):
                     for row in buffed:
                         hashed = self.hash(keyR.eval(this=row, that=row)) % mod
                         writersR[hashed].write(row)
                         writersR[hashed].flush()
-    
+
+        for writer in writersL + writersR:
+            writer.flush()
+            writer.file._close() 
+
         found = False
         for bucket in bucketsL:
             numRows = bucket.stat()["entries"]
@@ -243,8 +244,12 @@ class HashEqJoinPop(JoinPop['HashEqJoinPop.CompiledProps']):
                 num_memory_blocks, bucketsL, bucketsR, row_sizeL, row_sizeR, keyL, keyR, depth+1
             )
             if tempL and tempR:
-                newbucketsL, newbucketsR = tempL, tempR 
+                newbucketsL, newbucketsR = tempL, tempR
         else:
             newbucketsL, newbucketsR = bucketsL, bucketsR
+
+    
+        for bucket in newbucketsL + newbucketsR:
+            bucket._close()
 
         return newbucketsL, newbucketsR
