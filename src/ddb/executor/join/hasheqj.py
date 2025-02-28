@@ -189,27 +189,24 @@ class HashEqJoinPop(JoinPop['HashEqJoinPop.CompiledProps']):
 
         for partition in partitionsL:
             if isinstance(partition, HeapFile):
-                with partition.iter_scan() as partition_iter:
-                    for buffed in readerL.iter_buffer(partition_iter):
-                        for row in buffed:
-                            hashed = self.hash(keyL.eval(this=row, that=row)) % mod
-                            writersL[hashed].write(row)
+                partition = partition.iter_scan()
+            for buffed in readerL.iter_buffer(partition):
+                for row in buffed:
+                    hashed = self.hash(keyL.eval(this=row, that=row)) % mod
+                    writersL[hashed].write(row)
 
         for partition in partitionsR:
             if isinstance(partition, HeapFile):
-                with partition.iter_scan() as partition_iter:
-                    for buffed in readerR.iter_buffer(partition_iter):
-                        for row in buffed:
-                            hashed = self.hash(keyR.eval(this=row, that=row)) % mod
-                            writersR[hashed].write(row)
-
+                partition = partition.iter_scan()
+            for buffed in readerR.iter_buffer(partition):
+                for row in buffed:
+                    hashed = self.hash(keyR.eval(this=row, that=row)) % mod
+                    writersR[hashed].write(row)
  
         for w in writersL:
             w.flush()
-            #w._close()
         for w in writersR:
             w.flush()
-            #w._close()
 
         newbucketsL = bucketsL
         newbucketsR = bucketsR
