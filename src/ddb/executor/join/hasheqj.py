@@ -197,13 +197,13 @@ class HashEqJoinPop(JoinPop['HashEqJoinPop.CompiledProps']):
                         for row in buffed:
                             hashed = self.hash(keyL.eval(this=row, that=row)) % mod
                             writersL[hashed].write(row)
-                            writersL[hashed].flush()
+                            # writersL[hashed].flush()
             else:
                 for buffed in readerL.iter_buffer(partitionsL[i]):
                     for row in buffed:
                         hashed = self.hash(keyL.eval(this=row, that=row)) % mod
                         writersL[hashed].write(row)
-                        writersL[hashed].flush()
+                        # writersL[hashed].flush()
 
         
         for i in range(len(partitionsR)):
@@ -214,13 +214,13 @@ class HashEqJoinPop(JoinPop['HashEqJoinPop.CompiledProps']):
                         for row in buffed:
                             hashed = self.hash(keyR.eval(this=row, that=row)) % mod
                             writersR[hashed].write(row)
-                            writersR[hashed].flush()
+                            # writersR[hashed].flush()
             else:
                 for buffed in readerR.iter_buffer(partitionsR[i]):
                     for row in buffed:
                         hashed = self.hash(keyR.eval(this=row, that=row)) % mod
                         writersR[hashed].write(row)
-                        writersR[hashed].flush()
+                        # writersR[hashed].flush()
 
         for writer in writersL + writersR:
             writer.flush()
