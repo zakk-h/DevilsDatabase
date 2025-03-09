@@ -161,20 +161,27 @@ class HashEqJoinPop(JoinPop['HashEqJoinPop.CompiledProps']):
             for right_row in right_buffer:
                 right_key = self.compiled.right_join_vals_exec.eval(this=right_row, that=right_row)
                 hashed = self.hash(right_key) % mod
-                with left_buckets[hashed] as left_file:
-                    left_reader = BufferedReader(1)
-                    for left_buffer in left_reader.iter_buffer(left_file.iter_scan()):
-                        for left_row in left_buffer:
+                to_load = left_buckets.get(hashed)
+                if to_load:
+                    if isinstance(to_load, list): # in memory list
+                        for left_row in to_load:
                             if self.compiled.eq_exec.eval(this=left_row, that=right_row):
-                                # logging.debug(f"ZWH: Yielding row in join with {mod} buckets")
                                 yield (*left_row, *right_row)
+                    else: # heapfile
+                        with to_load as left_file:
+                            left_reader = BufferedReader(1)
+                            for left_buffer in left_reader.iter_buffer(left_file.iter_scan()):
+                                for left_row in left_buffer:
+                                    if self.compiled.eq_exec.eval(this=left_row, that=right_row):
+                                        # logging.debug(f"ZWH: Yielding row in join with {mod} buckets")
+                                        yield (*left_row, *right_row)
 
-    def recursive_partition(self, partition, depth): 
+    def recursive_partition(self, partition, depth):
         logging.debug(f"ZWH: recursive_partition initiated with depth {depth}")
         if depth == 0:
             mod = self.num_memory_blocks
-            buckets = [self._tmp_partition_file("left", depth, x) for x in range(mod)]
-            writers = [BufferedWriter(fl, 1) for fl in buckets]
+            buckets = {x: self._tmp_partition_file("left", depth, x) for x in range(mod)}
+            writers = {x: BufferedWriter(buckets[x], 1) for x in range(mod)}
             has_flushed = False
 
             reader = BufferedReader(1)
@@ -184,58 +191,64 @@ class HashEqJoinPop(JoinPop['HashEqJoinPop.CompiledProps']):
                     bucket_idx = self.hash(key) % mod
                     writers[bucket_idx].write(row)
 
-            has_flushed = any(writer.num_blocks_flushed > 0 for writer in writers)
-            logging.debug(f"ZWH: In depth=0, has_flushed is {has_flushed}")
-            logging.debug(f"ZWH: Depth 0 - Writers flush counts: {[writer.num_blocks_flushed for writer in writers]}")
-
-            for writer in writers: # ponder, for now do this for simplicity
+            logging.debug(f"ZWH: Depth 0 - Writers flush counts: {[writer.num_blocks_flushed for writer in writers.values()]}")
+            for writer in writers.values():
+                if writer.num_blocks_flushed > 0:
+                    has_flushed = True
                 writer.flush()
                 writer.file._close()
-                logging.debug(f"ZWH: Manual flush and close")
+                logging.debug("ZWH: Manual flush and close")
 
-            if has_flushed and depth+1 <= DEFAULT_HASH_MAX_DEPTH:
-                logging.debug(f"Calling recursive partition from depth=0 to depth=1")
-                return self.recursive_partition(buckets, depth+1) # list just holds references and file paths
-                #for bucket in buckets:
-                #    self.recursive_partition(bucket, depth + 1) # ponder if want to have uneven local depths or do everything all-together, in which case I need to handle a list of buckets
-            else: 
-                logging.debug(f"ZWH: No more hashing needs to be done, depth=0 is final")
-                return buckets,mod
+            logging.debug(f"ZWH: In depth=0, has_flushed is {has_flushed}")
 
-        else: # depth > 0
+            if has_flushed and depth + 1 <= DEFAULT_HASH_MAX_DEPTH:
+                logging.debug("ZWH: Calling recursive partition from depth=0 to depth=1")
+                return self.recursive_partition(buckets, depth + 1)
+            else:
+                logging.debug("ZWH: No more hashing needs to be done, depth=0 is final")
+                return buckets, mod
+
+        else:  # depth > 0
             new_buckets = {}
             mod = self.num_memory_blocks * ((self.num_memory_blocks - 1) ** depth)
             logging.debug(f"ZWH: Depth {depth} - Using mod {mod}")
             has_flushed = False
-            for parent_heap in partition:
-                with parent_heap as parent:
-                    logging.debug(f"ZWH: Depth {depth} - Processing parent bucket with id {getattr(parent_heap, 'bucket_id', 'ERROR (manually typed)')}")
-                    reader = BufferedReader(1)
-                    open_writers = {}
-                    for buffer in reader.iter_buffer(parent.iter_scan()):
-                        for row in buffer:
-                            key = self.compiled.left_join_vals_exec.eval(this=row, that=row)
-                            new_spot = self.hash(key) % mod
-                            if new_spot not in new_buckets:
-                                new_buckets[new_spot] = self._tmp_partition_file("left", depth, new_spot)
-                            if new_spot not in open_writers: # conditions should be equivalent
-                                open_writers[new_spot] = BufferedWriter(new_buckets[new_spot], 1)
-                            open_writers[new_spot].write(row)
-                    has_flushed = any(writer.num_blocks_flushed > 0 for writer in open_writers.values())
 
-                    logging.debug(f"ZWH: Depth {depth} - Finished processing parent bucket with sub-buckets {list(open_writers.keys())}")
-                    logging.debug(f"ZWH: This bucket split has_flushed is {has_flushed}")
-                    
-                    for writer in open_writers.values():
+            for d in partition.values():
+                if isinstance(d, HeapFile):
+                    d._open()
+                    scan = d.iter_scan()
+                else:
+                    scan = d
+
+                logging.debug(f"ZWH: Depth {depth} - Processing partition element")
+                reader = BufferedReader(1)
+                open_writers = {}
+                for buffer in reader.iter_buffer(scan):
+                    for row in buffer:
+                        key = self.compiled.left_join_vals_exec.eval(this=row, that=row)
+                        new_spot = self.hash(key) % mod
+                        if new_spot not in new_buckets:
+                            new_buckets[new_spot] = self._tmp_partition_file("left", depth, new_spot)
+                        if new_spot not in open_writers:
+                            open_writers[new_spot] = BufferedWriter(new_buckets[new_spot], 1)
+                        open_writers[new_spot].write(row)
+                if isinstance(d, HeapFile):
+                    d._close()
+
+                logging.debug(f"ZWH: Depth {depth} - Finished processing element with sub-buckets {list(open_writers.keys())}")
+                for key, writer in open_writers.items():
+                    if writer.num_blocks_flushed > 0:
+                        has_flushed = True
                         writer.flush()
                         writer.file._close()
-            if has_flushed and depth+1 <= DEFAULT_HASH_MAX_DEPTH:
-                logging.debug(f"ZWH: Depth {depth} - Some buckets flushed; recursing deeper to depth {depth+1}")
-                return self.recursive_partition(list(new_buckets.values()), depth + 1)
-            else: 
+                    else:
+                        new_buckets[key] = writer.buffer
+                        logging.debug(f"ZWH: Type of writer.buffer: {type(writer.buffer)}")
+
+            if has_flushed and depth + 1 <= DEFAULT_HASH_MAX_DEPTH:
+                logging.debug(f"ZWH: Depth {depth} - Some buckets flushed; recursing deeper to depth {depth + 1}")
+                return self.recursive_partition(new_buckets, depth + 1)
+            else:
                 logging.debug(f"ZWH: Depth {depth} - No flushes in new buckets; returning final buckets at depth {depth}")
-                # return list(new_buckets.values()), mod
                 return new_buckets, mod
-
-
-      
