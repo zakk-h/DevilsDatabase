@@ -152,7 +152,84 @@ class HashEqJoinPop(JoinPop['HashEqJoinPop.CompiledProps']):
 
     @profile_generator()
     def execute(self) -> Generator[tuple, None, None]:
-        # THIS IS WHERE YOUR IMPLEMENTATION SHOULD GO
-        # but feel free to define other helper methods in this class as you see fit
-        yield from ()
+        depth = 0
+        num_partitions = 1
+        sides = ['this', 'that']
+        join_vals_execs = [self.compiled.left_join_vals_exec, self.compiled.right_join_vals_exec]
+        build_side = 0 # 0 indicates left (this) and 1 indicates right (that)
+        partitions: list[list[HeapFile|QPop]] = [[self.left], [self.right]] # one list for left and one for right
+        while depth < DEFAULT_HASH_MAX_DEPTH:
+            logging.debug(f'***** partitioning pass {depth}')
+            fanout = self.num_memory_blocks if depth == 0 else self.num_memory_blocks - 1
+            old_num_partitions = num_partitions
+            num_partitions = old_num_partitions * fanout # conceptually, to used to mod the hash value
+            old_partitions = partitions
+            partitions = [list(), list()]
+            # note that the list won't be sorted by the mod value, but rather in a component-reversed order:
+            # for example, say each pass i does a 10-way partition and uses % 10^(i+1),
+            # then at the end of pass 2, ***110 would be stored in the 011-th partition in the list.
+            # this ordering ensures that each partition from the previous pass
+            # gets further divided into a contiguous range of partitions in the new pass.
+            max_partition_sizes = [0, 0]
+            for ci, join_vals_exec in enumerate(join_vals_execs):
+                for old_i, old_partition in enumerate(old_partitions[ci]):
+                    # since we mod the hash value, a row in old partition old_i must be in
+                    # one of new partitions between old_i*fanout and (old_i+1)*fanout-1;
+                    # let's create these new partitions and writers:
+                    writers: list[BufferedWriter] = list()
+                    partition_sizes = list()
+                    for j in range(fanout):
+                        partition = self._tmp_partition_file(sides[ci], depth, old_i*fanout+j)
+                        partitions[ci].append(partition)
+                        writers.append(BufferedWriter(partition, 1))
+                        partition_sizes.append(0)
+                    for row in (old_partition.execute() if isinstance(old_partition, QPop) else
+                                old_partition.iter_scan()): # iter_scan() needs 1 memory block
+                        join_vals = join_vals_exec.eval(**{sides[ci]: row})
+                        h = HashEqJoinPop.hash(join_vals) // old_num_partitions # ignore previously used bits
+                        partition_sizes[h % fanout] += getsizeof(row)
+                        writers[h % fanout].write(row)
+                    for writer in writers:
+                        writer.flush()
+                    # remove old partition:
+                    if isinstance(old_partition, HeapFile):
+                        self.context.sm.delete_heap_file(self.context.tmp_tx, old_partition.name)
+                    # update max size:
+                    max_partition_sizes[ci] = max(max_partition_sizes[ci], max(partition_sizes))
+            # check if max partition size is small enough for join/probe:
+            if max_partition_sizes[0] <= (self.num_memory_blocks - 1) * BLOCK_SIZE:
+                build_side = 0
+                break
+            elif max_partition_sizes[1] <= (self.num_memory_blocks - 1) * BLOCK_SIZE:
+                build_side = 1
+                break
+            depth += 1
+        logging.debug('***** probing/joining pass')
+        for build, probe in zip(partitions[build_side], partitions[1-build_side]):
+            # build:
+            build_rows_by_join_vals: dict[Any, list[tuple]] = dict()
+            join_vals_exec = join_vals_execs[build_side]
+            for row in (build.execute() if isinstance(build, QPop) else
+                        build.iter_scan()): # iter_scan() needs 1 memory block
+                join_vals = join_vals_exec.eval(**{sides[build_side]: row})
+                if join_vals not in build_rows_by_join_vals:
+                    build_rows_by_join_vals[join_vals] = list()
+                build_rows_by_join_vals[join_vals].append(row)
+            # remove build partition:
+            if isinstance(build, HeapFile):
+                self.context.sm.delete_heap_file(self.context.tmp_tx, build.name)
+            if len(build_rows_by_join_vals) > 0:
+                # stream in probe:
+                join_vals_exec = join_vals_execs[1-build_side]
+                for row in (probe.execute() if isinstance(probe, QPop) else
+                            probe.iter_scan()): # iter_scan() needs 1 memory block
+                    join_vals = join_vals_exec.eval(**{sides[1-build_side]: row})
+                    if join_vals not in build_rows_by_join_vals:
+                        continue # nothing can be possibly joined
+                    for build_row in build_rows_by_join_vals[join_vals]:
+                        if self.compiled.eq_exec.eval(**{sides[build_side]: build_row, sides[1-build_side]: row}):
+                            yield (*build_row, *row) if build_side == 0 else (*row, *build_row)
+            # remove probe partition:
+            if isinstance(probe, HeapFile):
+                self.context.sm.delete_heap_file(self.context.tmp_tx, probe.name)
         return
