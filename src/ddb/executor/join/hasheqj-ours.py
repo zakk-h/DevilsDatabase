@@ -152,85 +152,103 @@ class HashEqJoinPop(JoinPop['HashEqJoinPop.CompiledProps']):
         # return int.from_bytes(hashlib.sha256(str(v).encode('utf-8')).digest(), 'big')
 
     @profile_generator()
-    def execute(self) -> Generator[tuple, None, None]:
-        depth = 0
-        num_partitions = 1
-        sides = ['this', 'that']
-        join_vals_execs = [self.compiled.left_join_vals_exec, self.compiled.right_join_vals_exec]
-        build_side = 0 # 0 indicates left (this) and 1 indicates right (that)
-        partitions: list[list[HeapFile|QPop]] = [[self.left], [self.right]] # one list for left and one for right
-        while depth < DEFAULT_HASH_MAX_DEPTH:
-            logging.debug(f'***** partitioning pass {depth}')
-            fanout = self.num_memory_blocks if depth == 0 else self.num_memory_blocks - 1
-            old_num_partitions = num_partitions
-            num_partitions = old_num_partitions * fanout # conceptually, to used to mod the hash value
-            old_partitions = partitions
-            partitions = [list(), list()]
-            # note that the list won't be sorted by the mod value, but rather in a component-reversed order:
-            # for example, say each pass i does a 10-way partition and uses % 10^(i+1),
-            # then at the end of pass 2, ***110 would be stored in the 011-th partition in the list.
-            # this ordering ensures that each partition from the previous pass
-            # gets further divided into a contiguous range of partitions in the new pass.
-            max_partition_sizes = [0, 0]
-            for ci, join_vals_exec in enumerate(join_vals_execs):
-                for old_i, old_partition in enumerate(old_partitions[ci]):
-                    # since we mod the hash value, a row in old partition old_i must be in
-                    # one of new partitions between old_i*fanout and (old_i+1)*fanout-1;
-                    # let's create these new partitions and writers:
-                    writers: list[BufferedWriter] = list()
-                    partition_sizes = list()
-                    for j in range(fanout):
-                        partition = self._tmp_partition_file(sides[ci], depth, old_i*fanout+j)
-                        partitions[ci].append(partition)
-                        writers.append(BufferedWriter(partition, 1))
-                        partition_sizes.append(0)
-                    for row in (old_partition.execute() if isinstance(old_partition, QPop) else
-                                old_partition.iter_scan()): # iter_scan() needs 1 memory block
-                        join_vals = join_vals_exec.eval(**{sides[ci]: row})
-                        h = HashEqJoinPop.hash(join_vals) // old_num_partitions # ignore previously used bits
-                        partition_sizes[h % fanout] += getsizeof(row)
-                        writers[h % fanout].write(row)
-                    for writer in writers:
+    def execute(self) -> Generator[tuple, None, None]:   
+        left_buckets, mod = self.recursive_partition(self.left.execute(), depth=0)
+        logging.debug(f"ZWH: Returned, starting join with {mod} buckets")
+        right_reader = BufferedReader(self.num_memory_blocks-1)
+        #left_reader = BufferedReader(1)
+        for right_buffer in right_reader.iter_buffer(self.right.execute()):
+            for right_row in right_buffer:
+                right_key = self.compiled.right_join_vals_exec.eval(this=right_row, that=right_row)
+                hashed = self.hash(right_key) % mod
+                to_load = left_buckets.get(hashed)
+                if to_load:
+                    if isinstance(to_load, list): # in memory list
+                        for left_row in to_load:
+                            if self.compiled.eq_exec.eval(this=left_row, that=right_row):
+                                yield (*left_row, *right_row)
+                    else: # heapfile
+                        with to_load as left_file:
+                            left_reader = BufferedReader(1)
+                            for left_buffer in left_reader.iter_buffer(left_file.iter_scan()):
+                                for left_row in left_buffer:
+                                    if self.compiled.eq_exec.eval(this=left_row, that=right_row):
+                                        # logging.debug(f"ZWH: Yielding row in join with {mod} buckets")
+                                        yield (*left_row, *right_row)
+
+    def recursive_partition(self, partition, depth):
+        logging.debug(f"ZWH: recursive_partition initiated with depth {depth}")
+        if depth == 0:
+            mod = self.num_memory_blocks
+            buckets = {x: self._tmp_partition_file("left", depth, x) for x in range(mod)}
+            writers = {x: BufferedWriter(buckets[x], 1) for x in range(mod)}
+            has_flushed = False
+
+            reader = BufferedReader(1)
+            for buffer in reader.iter_buffer(partition):
+                for row in buffer:
+                    key = self.compiled.left_join_vals_exec.eval(this=row, that=row)
+                    bucket_idx = self.hash(key) % mod
+                    writers[bucket_idx].write(row)
+
+            logging.debug(f"ZWH: Depth 0 - Writers flush counts: {[writer.num_blocks_flushed for writer in writers.values()]}")
+            for writer in writers.values():
+                if writer.num_blocks_flushed > 0:
+                    has_flushed = True
+                writer.flush()
+                writer.file._close()
+                logging.debug("ZWH: Manual flush and close")
+
+            logging.debug(f"ZWH: In depth=0, has_flushed is {has_flushed}")
+
+            if has_flushed and depth + 1 <= DEFAULT_HASH_MAX_DEPTH:
+                logging.debug("ZWH: Calling recursive partition from depth=0 to depth=1")
+                return self.recursive_partition(buckets, depth + 1)
+            else:
+                logging.debug("ZWH: No more hashing needs to be done, depth=0 is final")
+                return buckets, mod
+
+        else:  # depth > 0
+            new_buckets = {}
+            mod = self.num_memory_blocks * ((self.num_memory_blocks - 1) ** depth)
+            logging.debug(f"ZWH: Depth {depth} - Using mod {mod}")
+            has_flushed = False
+
+            for d in partition.values():
+                if isinstance(d, HeapFile):
+                    d._open()
+                    scan = d.iter_scan()
+                else:
+                    scan = d
+
+                logging.debug(f"ZWH: Depth {depth} - Processing partition element")
+                reader = BufferedReader(1)
+                open_writers = {}
+                for buffer in reader.iter_buffer(scan):
+                    for row in buffer:
+                        key = self.compiled.left_join_vals_exec.eval(this=row, that=row)
+                        new_spot = self.hash(key) % mod
+                        if new_spot not in new_buckets:
+                            new_buckets[new_spot] = self._tmp_partition_file("left", depth, new_spot)
+                        if new_spot not in open_writers:
+                            open_writers[new_spot] = BufferedWriter(new_buckets[new_spot], 1)
+                        open_writers[new_spot].write(row)
+                if isinstance(d, HeapFile):
+                    d._close()
+
+                logging.debug(f"ZWH: Depth {depth} - Finished processing element with sub-buckets {list(open_writers.keys())}")
+                for key, writer in open_writers.items():
+                    if writer.num_blocks_flushed > 0:
+                        has_flushed = True
                         writer.flush()
-                    # remove old partition:
-                    if isinstance(old_partition, HeapFile):
-                        self.context.sm.delete_heap_file(self.context.tmp_tx, old_partition.name)
-                    # update max size:
-                    max_partition_sizes[ci] = max(max_partition_sizes[ci], max(partition_sizes))
-            # check if max partition size is small enough for join/probe:
-            if max_partition_sizes[0] <= (self.num_memory_blocks - 1) * BLOCK_SIZE:
-                build_side = 0
-                break
-            elif max_partition_sizes[1] <= (self.num_memory_blocks - 1) * BLOCK_SIZE:
-                build_side = 1
-                break
-            depth += 1
-        logging.debug('***** probing/joining pass')
-        for build, probe in zip(partitions[build_side], partitions[1-build_side]):
-            # build:
-            build_rows_by_join_vals: dict[Any, list[tuple]] = dict()
-            join_vals_exec = join_vals_execs[build_side]
-            for row in (build.execute() if isinstance(build, QPop) else
-                        build.iter_scan()): # iter_scan() needs 1 memory block
-                join_vals = join_vals_exec.eval(**{sides[build_side]: row})
-                if join_vals not in build_rows_by_join_vals:
-                    build_rows_by_join_vals[join_vals] = list()
-                build_rows_by_join_vals[join_vals].append(row)
-            # remove build partition:
-            if isinstance(build, HeapFile):
-                self.context.sm.delete_heap_file(self.context.tmp_tx, build.name)
-            if len(build_rows_by_join_vals) > 0:
-                # stream in probe:
-                join_vals_exec = join_vals_execs[1-build_side]
-                for row in (probe.execute() if isinstance(probe, QPop) else
-                            probe.iter_scan()): # iter_scan() needs 1 memory block
-                    join_vals = join_vals_exec.eval(**{sides[1-build_side]: row})
-                    if join_vals not in build_rows_by_join_vals:
-                        continue # nothing can be possibly joined
-                    for build_row in build_rows_by_join_vals[join_vals]:
-                        if self.compiled.eq_exec.eval(**{sides[build_side]: build_row, sides[1-build_side]: row}):
-                            yield (*build_row, *row) if build_side == 0 else (*row, *build_row)
-            # remove probe partition:
-            if isinstance(probe, HeapFile):
-                self.context.sm.delete_heap_file(self.context.tmp_tx, probe.name)
-        return
+                        writer.file._close()
+                    else:
+                        new_buckets[key] = writer.buffer
+                        logging.debug(f"ZWH: Type of writer.buffer: {type(writer.buffer)}")
+
+            if has_flushed and depth + 1 <= DEFAULT_HASH_MAX_DEPTH:
+                logging.debug(f"ZWH: Depth {depth} - Some buckets flushed; recursing deeper to depth {depth + 1}")
+                return self.recursive_partition(new_buckets, depth + 1)
+            else:
+                logging.debug(f"ZWH: Depth {depth} - No flushes in new buckets; returning final buckets at depth {depth}")
+                return new_buckets, mod
