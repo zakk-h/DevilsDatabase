@@ -72,16 +72,20 @@ class SUM(ArithOpValExpr, AggrValExpr):
     arity_max = 1
 
     def code_str_init(self) -> str:
-        raise NotImplementedError
+        #raise NotImplementedError
+        return "0"
 
     def code_str_add(self, state: str, child_code_str: str) -> str:
-        raise NotImplementedError
+        #raise NotImplementedError
+        return f"{state} + {child_code_str}"
 
     def code_str_merge(self, state1: str, state2: str) -> str:
-        raise NotImplementedError
+        #raise NotImplementedError
+        return f"{state1} + {state2}"
 
     def code_str_finalize(self, state: str) -> str:
-        raise NotImplementedError
+        #raise NotImplementedError
+        return state
 
 class COUNT(AggrValExpr):
     name = 'COUNT'
@@ -92,16 +96,20 @@ class COUNT(AggrValExpr):
         raise NotImplementedError
 
     def code_str_init(self) -> str:
-        raise NotImplementedError
+        #raise NotImplementedError
+        return "0"
 
     def code_str_add(self, state: str, child_code_str: str) -> str:
-        raise NotImplementedError
+        #raise NotImplementedError
+        return f"{state} + 1"
 
     def code_str_merge(self, state1: str, state2: str) -> str:
-        raise NotImplementedError
+        #raise NotImplementedError
+        return f"{state1} + {state2}"
 
     def code_str_finalize(self, state: str) -> str:
-        raise NotImplementedError
+        #raise NotImplementedError
+        return state
 
 class AVG(AggrValExpr):
     name = 'AVG'
@@ -162,16 +170,20 @@ class MIN(AggrValExpr):
         return True # even if DISTINCT
 
     def code_str_init(self) -> str:
-        raise NotImplementedError
+        #raise NotImplementedError
+        return "float('inf')"
     
     def code_str_add(self, state: str, child_code_str: str) -> str:
-        raise NotImplementedError
+        #raise NotImplementedError
+        return f"min({state}, {child_code_str})"
 
     def code_str_merge(self, state1: str, state2: str) -> str:
-        raise NotImplementedError
+        #raise NotImplementedError
+        return f"min({state1}, {state2})"
 
     def code_str_finalize(self, state: str) -> str:
-        raise NotImplementedError
+        #raise NotImplementedError
+        return state # handle if still inf?
 
 class MAX(AggrValExpr):
     name = 'MAX'
@@ -186,13 +198,17 @@ class MAX(AggrValExpr):
         return True # even if DISTINCT
 
     def code_str_init(self) -> str:
-        raise NotImplementedError
+        #raise NotImplementedError
+        return "float('-inf')"
     
     def code_str_add(self, state: str, child_code_str: str) -> str:
-        raise NotImplementedError
+        #raise NotImplementedError
+        return f"max({state}, {child_code_str})"
 
     def code_str_merge(self, state1: str, state2: str) -> str:
-        raise NotImplementedError
+        #raise NotImplementedError
+        return f"max({state1}, {state2})"
 
     def code_str_finalize(self, state: str) -> str:
-        raise NotImplementedError
+        #raise NotImplementedError
+        return state # any special cases?
