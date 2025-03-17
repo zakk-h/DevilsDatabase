@@ -146,16 +146,20 @@ class STDDEV_POP(AggrValExpr):
         return ValType.FLOAT, child_type
 
     def code_str_init(self) -> str:
-        raise NotImplementedError
+        #raise NotImplementedError
+        return "(0, 0, 0)"
 
     def code_str_add(self, state: str, child_code_str: str) -> str:
-        raise NotImplementedError
+        #raise NotImplementedError
+        return f"({state}[0] + {child_code_str}, {state}[1] + 1, {state}[2] + ({child_code_str})**2)"
 
     def code_str_merge(self, state1: str, state2: str) -> str:
-        raise NotImplementedError
+        #raise NotImplementedError
+        return f"({state1}[0] + {state2}[0], {state1}[1] + {state2}[1], {state1}[2] + {state2}[2])"
 
     def code_str_finalize(self, state: str) -> str:
-        raise NotImplementedError
+ 
+        return f")"
 
 class MIN(AggrValExpr):
     name = 'MIN'
@@ -184,6 +188,9 @@ class MIN(AggrValExpr):
     def code_str_finalize(self, state: str) -> str:
         #raise NotImplementedError
         return state # handle if still inf?
+    
+    def is_incremental(self) -> bool:
+        return True
 
 class MAX(AggrValExpr):
     name = 'MAX'
@@ -212,3 +219,6 @@ class MAX(AggrValExpr):
     def code_str_finalize(self, state: str) -> str:
         #raise NotImplementedError
         return state # any special cases?
+ 
+    def is_incremental(self) -> bool:
+        return True
