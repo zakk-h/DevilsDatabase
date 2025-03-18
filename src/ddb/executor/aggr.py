@@ -171,16 +171,26 @@ class AggrPop(QPop['AggrPop.CompiledProps']):
         calculated = []
         for row in sorter.execute():
             grp = tuple(group_exec(row) for group_exec in self.compiled.groupby_execs) # e.g. (engineering, 2023)
-            if currgroup is None:
+            if currgroup is None: # handling first row
                 currgroup = grp
 
             if grp != currgroup:
+                # should already be calculated by the time we get to a new group
                 yield calculated
                 calculated = self.compiled.aggr_init_execs 
             else: 
+                # initialize initial states for all aggregates - need access to all after, yield all at once
                 for i, aggr_expr in enumerate(self.aggr_exprs):
                     # aggr_expr.is_distinct
                     # aggr_expr.is_incremental
+                    # use aggr_add_execs, or more efficiently - merge.
+                    # store as much as you can in memory, and then merge with the previous results - so you have batches of rows
+                    # of course, if you hit a new group, stop that block early and merge
+                    # merge is much more efficient than add
+
+                    # if incremental we have it easy - no sorting needed (anything without distinct our recurrence works, also min and max with distinct)
+                    # non-incremental needs sorting: distinct mean, distinct stddev
+                    
             
 
             
