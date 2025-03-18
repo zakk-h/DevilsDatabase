@@ -7,7 +7,7 @@ from ddb.session import Session
 from ddb.parser import parse_all
 
 testcase_dir = "tests/aggr/"
-T = 0 # 21 total number of test cases
+T = 21 # 21 total number of test cases
 
 @pytest.fixture
 def session():
