@@ -170,16 +170,17 @@ class AggrPop(QPop['AggrPop.CompiledProps']):
         currgroup = None
         calculated = []
         for row in sorter.execute():
-            grp = self.compiled.groupby_execs.eval(this=row, that=row)
+            grp = tuple(group_exec(row) for group_exec in self.compiled.groupby_execs) # e.g. (engineering, 2023)
             if currgroup is None:
                 currgroup = grp
 
             if grp != currgroup:
                 yield calculated
-                calculated = self.compiled.aggr_init_execs
-
-            calculated = self.compiled.aggr_add_execs.
-            self.compiled.aggr_input_execs
+                calculated = self.compiled.aggr_init_execs 
+            else: 
+                for i, aggr_expr in enumerate(self.aggr_exprs):
+                    # aggr_expr.is_distinct
+                    # aggr_expr.is_incremental
             
 
             
