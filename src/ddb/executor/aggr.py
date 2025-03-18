@@ -170,70 +170,102 @@ class AggrPop(QPop['AggrPop.CompiledProps']):
     @profile_generator()
     def execute(self) -> Generator[tuple, None, None]:
         logging.debug("num_memory_blocks: %s, message: %s", self.num_memory_blocks, "zwh")
-        grouped_files = []
-        currWriter = None
-        currgroup = None
-        inpreader = BufferedReader(self.memory_blocks_required() // 2)
 
-        for buffer in inpreader.iter_buffer(self.input.execute()):
-            for row in buffer:
-                grp = tuple(group_exec.eval(row0=row) for group_exec in self.compiled.groupby_execs)
+        needed = False
+        for i in range(len(self.aggr_exprs)):
+            if not self.aggr_exprs[i].is_incremental:
+                needed = True
 
-                if currWriter is None or currgroup is None or currgroup != grp:
-                    if currWriter is not None:
-                        currWriter.flush()
-                        currWriter.file._close()
+        if needed:
+            grouped_files = []
+            currWriter = None
+            currgroup = None
+            inpreader = BufferedReader(self.memory_blocks_required() // 2)
 
-                    fle = self._tmp_file("-".join(map(str, grp)))
-                    grouped_files.append((grp, fle)) # store actual group to yield at end
-                    currWriter = BufferedWriter(fle, self.memory_blocks_required() // 2)
-                    currgroup = grp
+            for buffer in inpreader.iter_buffer(self.input.execute()):
+                for row in buffer:
+                    grp = tuple(group_exec.eval(row0=row) for group_exec in self.compiled.groupby_execs)
 
-                currWriter.write(row)
-        if currWriter is not None:
-            currWriter.flush()
-            currWriter.file._close()
+                    if currWriter is None or currgroup is None or currgroup != grp:
+                        if currWriter is not None:
+                            currWriter.flush()
+                            currWriter.file._close()
+
+                        fle = self._tmp_file("-".join(map(str, grp)))
+                        grouped_files.append((grp, fle)) # store actual group to yield at end
+                        currWriter = BufferedWriter(fle, self.memory_blocks_required() // 2)
+                        currgroup = grp
+
+                    currWriter.write(row)
+            if currWriter is not None:
+                currWriter.flush()
+                currWriter.file._close()
+
+        finalNeeded = {}
+
+        for i in range(len(self.aggr_exprs)):
+            if self.aggr_exprs[i].is_incremental:
+                currgroup = None
+                currState = [exec.eval() for exec in self.compiled.aggr_init_execs]
+                for row in self.input.execute():
+                    grp = tuple(group_exec.eval(row0=row) for group_exec in self.compiled.groupby_execs)
+
+                    if currgroup is None:
+                        currgroup = grp
+                    
+                    if currgroup != grp:
+                        finalNeeded["-".join(map(str, currgroup))] = currState
+                        currgroup = grp
+                        currState = [exec.eval() for exec in self.compiled.aggr_init_execs]
+                    curr = self.compiled.aggr_input_execs[i].eval(row0=row)
+                    currState[i] = self.compiled.aggr_add_execs[i].eval(state=currState[i], new_val=curr)
+
+                if currgroup is not None:
+                    finalNeeded["-".join(map(str, currgroup))] = currState
+
+            else:
+
+                for grp, tmp_file in grouped_files:
+                    tmp_file._open('r')
             
-        for group_key, tmp_file in grouped_files:
-            tmp_file._open('r')
-            
-            calculated_aggregates = [exec.eval() for exec in self.compiled.aggr_init_execs]
-            
-            for i in range(len(self.aggr_exprs)):
+                    if ("-".join(map(str, grp)) not in finalNeeded):
+                        finalNeeded["-".join(map(str, grp))] = [exec.eval() for exec in self.compiled.aggr_init_execs]
                 
-                def compare_rows(row1, row2):
-                    val1 = self.compiled.aggr_input_execs[i].eval(row0=row1)
-                    val2 = self.compiled.aggr_input_execs[i].eval(row0=row2)
-                    return -1 if val1 < val2 else (1 if val1 > val2 else 0)
+                    def compare_rows(row1, row2):
+                        val1 = self.compiled.aggr_input_execs[i].eval(row0=row1)
+                        val2 = self.compiled.aggr_input_execs[i].eval(row0=row2)
+                        return -1 if val1 < val2 else (1 if val1 > val2 else 0)
                     
                 
-                sort_buffer = ExtSortBuffer(
-                    compare=compare_rows,
-                    tmp_file_create=lambda level, run: self._tmp_file(f"sort-{i}-{level}-{run}"),
-                    tmp_file_delete=lambda f: f._close(),
-                    num_memory_blocks=self.memory_blocks_required(),
-                    deduplicate=self.aggr_exprs[i].is_distinct
-                )
+                    sort_buffer = ExtSortBuffer(
+                        compare=compare_rows,
+                        tmp_file_create=lambda level, run: self._tmp_file(f"sort-{i}-{level}-{run}"),
+                        tmp_file_delete=lambda f: f._close(),
+                        num_memory_blocks=self.memory_blocks_required(),
+                        deduplicate=self.aggr_exprs[i].is_distinct
+                    )
                 
                 
-                reader = BufferedReader(1)
-                for buffer in reader.iter_buffer(tmp_file.iter_scan()):
-                    for row in buffer:
-                        sort_buffer.add(row)
+                    reader = BufferedReader(1)
+                    for buffer in reader.iter_buffer(tmp_file.iter_scan()):
+                        for row in buffer:
+                            sort_buffer.add(row)
                 
-                previous = None
-                for row in sort_buffer.iter_and_clear():
-                    curr = self.compiled.aggr_input_execs[i].eval(row0=row)
-                    if self.aggr_exprs[i].is_distinct:
-                        
-                        if previous is not None and curr == previous:
-                            continue
-                    calculated_aggregates[i] = self.compiled.aggr_add_execs[i].eval(state=calculated_aggregates[i], new_val=curr)
-                    previous = curr
+                    previous = None
+                    for row in sort_buffer.iter_and_clear():
+                        curr = self.compiled.aggr_input_execs[i].eval(row0=row)
+                        if self.aggr_exprs[i].is_distinct:
+                            
+                            if previous is not None and curr == previous:
+                                continue
+                        finalNeeded["-".join(map(str, grp))][i] = self.compiled.aggr_add_execs[i].eval(state=finalNeeded["-".join(map(str, grp))][i], new_val=curr)
+                        previous = curr
+
+                    tmp_file._close()
             
-            finals = [finalizer.eval(state=calculated_aggregates[i]) for i, finalizer in enumerate(self.compiled.aggr_finalize_execs)]
-            
-            yield group_key + tuple(finals)
-            tmp_file._close()
+        for key in finalNeeded.keys():
+            finals = [finalizer.eval(state=finalNeeded[key][i]) for i, finalizer in enumerate(self.compiled.aggr_finalize_execs)]
+            grp_key = tuple(key.split("-"))
+            yield grp_key + tuple(finals)
 
         return
