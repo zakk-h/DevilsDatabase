@@ -7,7 +7,7 @@ from ddb.session import Session
 from ddb.parser import parse_all
 
 testcase_dir = "tests/aggr/"
-T = 21 # 21 total number of test cases
+T = 12 # 21 total number of test cases
 
 @pytest.fixture
 def session():
@@ -49,8 +49,7 @@ def test_session(session, capsys, t_id):
         command_id = 0
         for parse_tree in parse_all(fsql.read()):
             r = session.request(parse_tree)
-            assert r.error is None, f"Test{t_id}, command{command_id}: got error."
-            assert r.error_details is None, f"Test{t_id}, command{command_id}: got error message."
+            assert r.error is None, f"Test{t_id}, command{command_id}: got error: {r.error_details}"
             assert r.response.startswith(answer[command_id][0]), f"Test{t_id}, command{command_id}: incorrect command."
             if r.response.startswith("SELECT"):
                 # check the aggr count

@@ -1,6 +1,8 @@
 from typing import cast, Final, Iterable, Generator, Sequence
 from dataclasses import dataclass
 from functools import cached_property, partial
+import logging
+logging.basicConfig(level=logging.DEBUG)
 
 from ..profile import profile_generator
 from ..storage import HeapFile
@@ -167,14 +169,15 @@ class AggrPop(QPop['AggrPop.CompiledProps']):
 
     @profile_generator()
     def execute(self) -> Generator[tuple, None, None]:
+        logging.debug("num_memory_blocks: %s, message: %s", self.num_memory_blocks, "zwh")
         grouped_files = []
         currWriter = None
         currgroup = None
-        inpreader = BufferedReader(self.num_memory_blocks // 2)
+        inpreader = BufferedReader(self.memory_blocks_required() // 2)
 
         for buffer in inpreader.iter_buffer(self.input.execute()):
             for row in buffer:
-                grp = tuple(group_exec.eval(row) for group_exec in self.compiled.groupby_execs)  
+                grp = tuple(group_exec.eval(row0=row) for group_exec in self.compiled.groupby_execs)
 
                 if currWriter is None or currgroup is None or currgroup != grp:
                     if currWriter is not None:
@@ -183,7 +186,7 @@ class AggrPop(QPop['AggrPop.CompiledProps']):
 
                     fle = self._tmp_file("-".join(map(str, grp)))
                     grouped_files.append((grp, fle)) # store actual group to yield at end
-                    currWriter = BufferedWriter(fle, self.num_memory_blocks // 2)
+                    currWriter = BufferedWriter(fle, self.memory_blocks_required() // 2)
                     currgroup = grp
 
                 currWriter.write(row)
@@ -193,29 +196,43 @@ class AggrPop(QPop['AggrPop.CompiledProps']):
             
         for group_key, tmp_file in grouped_files:
             tmp_file._open('r')
-            orders_asc = [True] * len(self.aggr_exprs)
-
-            sorters = [MergeSortPop(tmp_file, [self.compiled.aggr_input_execs[i]], orders_asc, self.num_memory_blocks)
-                    for i in range(len(self.aggr_exprs))]
-
-            calculated_aggregates = [exec() for exec in self.compiled.aggr_init_execs]
-
-            for i in range(len(sorters)):
-                currReader = BufferedReader(self.num_memory_blocks)
-                previous = None
-
-                for buffer in currReader.iter_buffer(sorters[i].iter_scan()):
+            
+            calculated_aggregates = [exec.eval() for exec in self.compiled.aggr_init_execs]
+            
+            for i in range(len(self.aggr_exprs)):
+                
+                def compare_rows(row1, row2):
+                    val1 = self.compiled.aggr_input_execs[i].eval(row0=row1)
+                    val2 = self.compiled.aggr_input_execs[i].eval(row0=row2)
+                    return -1 if val1 < val2 else (1 if val1 > val2 else 0)
+                    
+                
+                sort_buffer = ExtSortBuffer(
+                    compare=compare_rows,
+                    tmp_file_create=lambda level, run: self._tmp_file(f"sort-{i}-{level}-{run}"),
+                    tmp_file_delete=lambda f: f._close(),
+                    num_memory_blocks=self.memory_blocks_required(),
+                    deduplicate=self.aggr_exprs[i].is_distinct
+                )
+                
+                
+                reader = BufferedReader(1)
+                for buffer in reader.iter_buffer(tmp_file.iter_scan()):
                     for row in buffer:
-                        curr = self.compiled.aggr_input_execs[i](row)
-
-                        if previous is None or previous != curr or not self.aggr_exprs[i].is_distinct:
-                            calculated_aggregates[i] = self.compiled.aggr_add_execs[i](calculated_aggregates[i], curr)
-
-                        previous = curr 
-
-            # Finalize aggregation
-            finals = [exec(calculated_aggregates[i]) for i, exec in enumerate(self.compiled.aggr_finalize_execs)]
-
+                        sort_buffer.add(row)
+                
+                previous = None
+                for row in sort_buffer.iter_and_clear():
+                    curr = self.compiled.aggr_input_execs[i].eval(row0=row)
+                    if self.aggr_exprs[i].is_distinct:
+                        
+                        if previous is not None and curr == previous:
+                            continue
+                    calculated_aggregates[i] = self.compiled.aggr_add_execs[i].eval(state=calculated_aggregates[i], new_val=curr)
+                    previous = curr
+            
+            finals = [finalizer.eval(state=calculated_aggregates[i]) for i, finalizer in enumerate(self.compiled.aggr_finalize_execs)]
+            
             yield group_key + tuple(finals)
             tmp_file._close()
 
