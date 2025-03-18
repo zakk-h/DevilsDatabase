@@ -11,6 +11,8 @@ from ..metadata import TableMetadata, INTERNAL_ANON_COLUMN_NAME_FORMAT, INTERNAL
 from .interface import ExecutorException, QPop
 from .util import ExtSortBuffer
 
+from .mergesort import MergeSortPop
+
 class AggrPop(QPop['AggrPop.CompiledProps']):
     """A physical operator for computing aggregate expression values over grouped input rows.
     This operator will output one row for each group, containing only the group-by values
@@ -162,5 +164,25 @@ class AggrPop(QPop['AggrPop.CompiledProps']):
     def execute(self) -> Generator[tuple, None, None]:
         # THIS IS WHERE YOUR IMPLEMENTATION SHOULD GO
         # but feel free to define other helper methods in this class as you see fit
+        orders_asc = [True] * len(self.aggr_exprs)
+        sorter = MergeSortPop(input, self.aggr_exprs, orders_asc, self.num_memory_blocks)
+
+        currgroup = None
+        calculated = []
+        for row in sorter.execute():
+            grp = self.compiled.groupby_execs.eval(this=row, that=row)
+            if currgroup is None:
+                currgroup = grp
+
+            if grp != currgroup:
+                yield calculated
+                calculated = self.compiled.aggr_init_execs
+
+            calculated = self.compiled.aggr_add_execs.
+            self.compiled.aggr_input_execs
+            
+
+            
+
         yield from ()
         return

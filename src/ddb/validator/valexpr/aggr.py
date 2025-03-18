@@ -158,8 +158,8 @@ class STDDEV_POP(AggrValExpr):
         return f"({state1}[0] + {state2}[0], {state1}[1] + {state2}[1], {state1}[2] + {state2}[2])"
 
     def code_str_finalize(self, state: str) -> str:
- 
-        return f")"
+        #raise NotImplementedError
+        return f"(({state}[2] - 2*({state}[0]/{state}[1])*{state}[0] + {state}[1]*({state}[0]/{state}[1])**2)/{state}[1])**0.5"
 
 class MIN(AggrValExpr):
     name = 'MIN'
