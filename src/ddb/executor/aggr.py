@@ -208,7 +208,22 @@ class AggrPop(QPop['AggrPop.CompiledProps']):
             # now we process the rows on the outside            
             for row in self.input.execute():
                 grp = tuple(group_exec.eval(row0=row) for group_exec in self.compiled.groupby_execs)
-                grp_key = "-".join(map(str, grp))
+                grp_key = "-".join(map(str, grp)) # creates a string key for the dictionary based on the group values
+                # ("Engineering", "New York") -> Engineering-New York
+                # this conversion could cause problems if the group values themselves contained hyphens,
+                # which is why we're now storing the original tuple alongside the states - 
+                # we use the string only as a lookup key, but preserve the original values for the final output.
+                # using it as a lookup is fine because it is injective
+                '''
+                The previous approach was problematic for the following reason.
+                grp_key = "-".join(map(str, grp))  # E.g., "42-Engineering-2023-01-15"
+                grp_tuple = tuple(grp_key.split("-"))  # Now becomes ("42", "Engineering", "2023-01-15")
+                
+                To use the strings as a lookup, we need the map to be injective, so no two tuples correspond to the same string.
+                Tuple (1, 2, 3) → "1-2-3"
+                Tuple ("1", "2-3") → "1-2-3"
+                This is not guaranteed, see above, so this is unsafe.
+                '''
                 
                 # new group we haven't seen before
                 if grp_key not in finalNeeded:
@@ -286,13 +301,10 @@ class AggrPop(QPop['AggrPop.CompiledProps']):
                                     new_val=curr
                                 )
                         tmp_file._close()
-
-                                
+           
         for grp_key, group_and_states in finalNeeded.items():
             original_group = group_and_states[0]  # first value element is the original group tuple, e.g. if we grouped by department, those names
             states = group_and_states[1] # second element is the list of aggregate states
             
             finals = [finalizer.eval(state=states[i]) for i, finalizer in enumerate(self.compiled.aggr_finalize_execs)] # taking iterative states that are completed to their final form, often that is just returning themselves, othertimes a state encorporated a lot of information that must be synthesized
             yield original_group + tuple(finals)
-
-        return
