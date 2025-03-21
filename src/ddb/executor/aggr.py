@@ -213,13 +213,14 @@ class AggrPop(QPop['AggrPop.CompiledProps']):
                 # new group we haven't seen before
                 if grp_key not in finalNeeded:
                     # initialize state for all aggregates for this group
-                    finalNeeded[grp_key] = [exec.eval() for exec in self.compiled.aggr_init_execs]
+                    #finalNeeded[grp_key] = [exec.eval() for exec in self.compiled.aggr_init_execs]
+                    finalNeeded[grp_key] = (grp, [exec.eval() for exec in self.compiled.aggr_init_execs])
                 
                 # process each aggregate for this row
                 for i in range(len(self.aggr_exprs)):
                     curr = self.compiled.aggr_input_execs[i].eval(row0=row)
-                    finalNeeded[grp_key][i] = self.compiled.aggr_add_execs[i].eval(
-                        state=finalNeeded[grp_key][i], 
+                    finalNeeded[grp_key][1][i] = self.compiled.aggr_add_execs[i].eval(
+                        state=finalNeeded[grp_key][1][i], # finalNeeded[grp_key][i], # now we have this 2 piece of information store 
                         new_val=curr
                     )
 
@@ -228,7 +229,8 @@ class AggrPop(QPop['AggrPop.CompiledProps']):
             for grp, _ in grouped_files:
                 grp_key = "-".join(map(str, grp))
                 if grp_key not in finalNeeded:
-                    finalNeeded[grp_key] = [exec.eval() for exec in self.compiled.aggr_init_execs]
+                    #finalNeeded[grp_key] = [exec.eval() for exec in self.compiled.aggr_init_execs]
+                    finalNeeded[grp_key] = (grp, [exec.eval() for exec in self.compiled.aggr_init_execs])
             
             # now process each aggregate expression -> aggregation expressions -> rows in groups
             # we can't do row loop and then aggregation expression inside or not because the way we sort (if applicable) depends on aggregation expression and column details
@@ -267,8 +269,8 @@ class AggrPop(QPop['AggrPop.CompiledProps']):
                             if self.aggr_exprs[i].is_distinct: # remove duplicates
                                 if previous is not None and curr == previous: # if not first row and the same column value back to back
                                     continue # no need to add again
-                            finalNeeded[grp_key][i] = self.compiled.aggr_add_execs[i].eval( # merge old state and new finding 
-                                state=finalNeeded[grp_key][i], 
+                            finalNeeded[grp_key][1][i] = self.compiled.aggr_add_execs[i].eval( # merge old state and new finding 
+                                state=finalNeeded[grp_key][1][i], #finalNeeded[grp_key][i], 
                                 new_val=curr
                             )
                             previous = curr
@@ -279,16 +281,18 @@ class AggrPop(QPop['AggrPop.CompiledProps']):
                         for buffer in reader.iter_buffer(tmp_file.iter_scan()):
                             for row in buffer:
                                 curr = self.compiled.aggr_input_execs[i].eval(row0=row)
-                                finalNeeded[grp_key][i] = self.compiled.aggr_add_execs[i].eval(
-                                    state=finalNeeded[grp_key][i], 
+                                finalNeeded[grp_key][1][i] = self.compiled.aggr_add_execs[i].eval(
+                                    state=finalNeeded[grp_key][1][i], #finalNeeded[grp_key][i], 
                                     new_val=curr
                                 )
                         tmp_file._close()
 
                                 
-        for grp_key, states in finalNeeded.items():
-            finals = [finalizer.eval(state=states[i]) for i, finalizer in enumerate(self.compiled.aggr_finalize_execs)]
-            grp_tuple = tuple(grp_key.split("-"))
-            yield grp_tuple + tuple(finals)
+        for grp_key, group_and_states in finalNeeded.items():
+            original_group = group_and_states[0]  # first value element is the original group tuple, e.g. if we grouped by department, those names
+            states = group_and_states[1] # second element is the list of aggregate states
+            
+            finals = [finalizer.eval(state=states[i]) for i, finalizer in enumerate(self.compiled.aggr_finalize_execs)] # taking iterative states that are completed to their final form, often that is just returning themselves, othertimes a state encorporated a lot of information that must be synthesized
+            yield original_group + tuple(finals)
 
         return
