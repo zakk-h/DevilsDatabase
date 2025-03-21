@@ -223,6 +223,8 @@ class AggrPop(QPop['AggrPop.CompiledProps']):
                 Tuple (1, 2, 3) → "1-2-3"
                 Tuple ("1", "2-3") → "1-2-3"
                 This is not guaranteed, see above, so this is unsafe.
+                Tuples in Python are hashable and immutable, making them perfect as dictionary keys. Don't use strings.
+                But even if we fix this, our file name map is still not injective because it is the same map.
                 '''
                 
                 # new group we haven't seen before
