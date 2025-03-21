@@ -203,67 +203,92 @@ class AggrPop(QPop['AggrPop.CompiledProps']):
 
         finalNeeded = {}
 
-        for i in range(len(self.aggr_exprs)): # all aggregation expressions we have to do (STDEV, AVG, etc)
-            if not needed: # we have not created files
-                currgroup = None # how we start off
-                currState = [exec.eval() for exec in self.compiled.aggr_init_execs] # initing value for each aggregation expression, like 0 for sum.
-                for row in self.input.execute(): # going over each row if we don't have files
-                    grp = tuple(group_exec.eval(row0=row) for group_exec in self.compiled.groupby_execs) # getting the columns we're grouping by
-
-                    if currgroup is None: # just starting off, this is the group we are in
-                        currgroup = grp
-                    
-                    if currgroup != grp: # transition, save old group stats
-                        finalNeeded["-".join(map(str, currgroup))] = currState # ????? gets a bunch of strings and joins with dash
-                        currgroup = grp # update 
-                        currState = [exec.eval() for exec in self.compiled.aggr_init_execs] # if we change group, we need to update state
-                    curr = self.compiled.aggr_input_execs[i].eval(row0=row)  # extracting the value from the column we're aggregating on, like summing this column. same size, so aggr_exprs and init_execs are paired
-                    currState[i] = self.compiled.aggr_add_execs[i].eval(state=currState[i], new_val=curr) # merge the value we just got with the past state
-
-                if currgroup is not None: # for the last group
-                    finalNeeded["-".join(map(str, currgroup))] = currState # ?????
-
-            else: # we have grouped files
-                for grp, tmp_file in grouped_files:
-                    tmp_file._open('r') # open, read-only
-            
-                    if ("-".join(map(str, grp)) not in finalNeeded):
-                        finalNeeded["-".join(map(str, grp))] = [exec.eval() for exec in self.compiled.aggr_init_execs] # init value for each aggregation expression
+        if not needed:
+            currgroup = None
+            # now we process the rows on the outside            
+            for row in self.input.execute():
+                grp = tuple(group_exec.eval(row0=row) for group_exec in self.compiled.groupby_execs)
+                grp_key = "-".join(map(str, grp))
                 
-                    def compare_rows(row1, row2): # getting the value of the relevant column and comparing
-                        val1 = self.compiled.aggr_input_execs[i].eval(row0=row1)
-                        val2 = self.compiled.aggr_input_execs[i].eval(row0=row2)
-                        return -1 if val1 < val2 else (1 if val1 > val2 else 0)
-                    
+                # new group we haven't seen before
+                if grp_key not in finalNeeded:
+                    # initialize state for all aggregates for this group
+                    finalNeeded[grp_key] = [exec.eval() for exec in self.compiled.aggr_init_execs]
                 
-                    sort_buffer = ExtSortBuffer(
-                        compare=compare_rows, # sort by the relevant column we are aggregating on, if we want distinct
-                        tmp_file_create=lambda level, run: self._tmp_file(f"sort-{i}-{level}-{run}"),
-                        tmp_file_delete=lambda f: f._close(),
-                        num_memory_blocks=self.memory_blocks_required(),
-                        deduplicate=self.aggr_exprs[i].is_distinct # good, distinct, optional (not incremental implies distinct, but if one aggr expression is distinct, we make files for all of them so then they could be here)
+                # process each aggregate for this row
+                for i in range(len(self.aggr_exprs)):
+                    curr = self.compiled.aggr_input_execs[i].eval(row0=row)
+                    finalNeeded[grp_key][i] = self.compiled.aggr_add_execs[i].eval(
+                        state=finalNeeded[grp_key][i], 
+                        new_val=curr
                     )
-                
-                
-                    reader = BufferedReader(1) # read from the file and add to the sort
-                    for buffer in reader.iter_buffer(tmp_file.iter_scan()):
-                        for row in buffer:
-                            sort_buffer.add(row) # add row to be sorted for the file, and supposedly deduplicate if applicable
-                
-                    previous = None
-                    for row in sort_buffer.iter_and_clear():
-                        curr = self.compiled.aggr_input_execs[i].eval(row0=row)
-                        if self.aggr_exprs[i].is_distinct: # double-check
-                            if previous is not None and curr == previous: # we're in same group (not first row) and had the same last value. we only care about the last value because sorted by what we care about
-                                continue # don't save it, or add it to aggregate statess
-                        finalNeeded["-".join(map(str, grp))][i] = self.compiled.aggr_add_execs[i].eval(state=finalNeeded["-".join(map(str, grp))][i], new_val=curr)
-                        previous = curr
 
-                    tmp_file._close() # done with this group
+        else:  # if we had one or more non-incremental expressions, we have this loop to go over the files for all of them. some may be incremental, some not
+            # first pass through the grouped files to initialize all group states
+            for grp, _ in grouped_files:
+                grp_key = "-".join(map(str, grp))
+                if grp_key not in finalNeeded:
+                    finalNeeded[grp_key] = [exec.eval() for exec in self.compiled.aggr_init_execs]
             
-        for key in finalNeeded.keys():
-            finals = [finalizer.eval(state=finalNeeded[key][i]) for i, finalizer in enumerate(self.compiled.aggr_finalize_execs)]
-            grp_key = tuple(key.split("-"))
-            yield grp_key + tuple(finals)
+            # now process each aggregate expression -> aggregation expressions -> rows in groups
+            # we can't do row loop and then aggregation expression inside or not because the way we sort (if applicable) depends on aggregation expression and column details
+            # different aggregate expressions might require different sorting orders
+            # the external sorting process is dependent on the specific aggregate expression being evaluated
+            for grp, tmp_file in grouped_files:
+                grp_key = "-".join(map(str, grp))
+                
+                # process each aggregate expression for this group's file, sorting if applicable
+                for i in range(len(self.aggr_exprs)):
+                    tmp_file._open('r')
+                    
+                    if not self.aggr_exprs[i].is_incremental(): # only do the sorting if we need to (i.e. duplicates need to be removed and that is what we need to do to remove them)
+                        def compare_rows(row1, row2):
+                            val1 = self.compiled.aggr_input_execs[i].eval(row0=row1)
+                            val2 = self.compiled.aggr_input_execs[i].eval(row0=row2)
+                            return -1 if val1 < val2 else (1 if val1 > val2 else 0)
+                        
+                        # some may be incremental and in this else loop of "needed" because we file-grouped every group in this case if 1 aggregate was non-incremental)
+                        sort_buffer = ExtSortBuffer(
+                            compare=compare_rows,
+                            tmp_file_create=lambda level, run: self._tmp_file(f"sort-{i}-{level}-{run}"),
+                            tmp_file_delete=lambda f: f._close(),
+                            num_memory_blocks=self.memory_blocks_required(),
+                            deduplicate=self.aggr_exprs[i].is_distinct
+                        )
+                        
+                        reader = BufferedReader(1)
+                        for buffer in reader.iter_buffer(tmp_file.iter_scan()):
+                            for row in buffer:
+                                sort_buffer.add(row) # need sorting
+                        
+                        previous = None
+                        for row in sort_buffer.iter_and_clear():
+                            curr = self.compiled.aggr_input_execs[i].eval(row0=row)
+                            if self.aggr_exprs[i].is_distinct: # remove duplicates
+                                if previous is not None and curr == previous: # if not first row and the same column value back to back
+                                    continue # no need to add again
+                            finalNeeded[grp_key][i] = self.compiled.aggr_add_execs[i].eval( # merge old state and new finding 
+                                state=finalNeeded[grp_key][i], 
+                                new_val=curr
+                            )
+                            previous = curr
+                        tmp_file._close()
+
+                    else: # for incremental aggregates, process directly without sorting
+                        reader = BufferedReader(1)
+                        for buffer in reader.iter_buffer(tmp_file.iter_scan()):
+                            for row in buffer:
+                                curr = self.compiled.aggr_input_execs[i].eval(row0=row)
+                                finalNeeded[grp_key][i] = self.compiled.aggr_add_execs[i].eval(
+                                    state=finalNeeded[grp_key][i], 
+                                    new_val=curr
+                                )
+                        tmp_file._close()
+
+                                
+        for grp_key, states in finalNeeded.items():
+            finals = [finalizer.eval(state=states[i]) for i, finalizer in enumerate(self.compiled.aggr_finalize_execs)]
+            grp_tuple = tuple(grp_key.split("-"))
+            yield grp_tuple + tuple(finals)
 
         return
