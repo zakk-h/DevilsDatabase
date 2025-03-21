@@ -173,95 +173,93 @@ class AggrPop(QPop['AggrPop.CompiledProps']):
 
         needed = False
         for i in range(len(self.aggr_exprs)):
-            if not self.aggr_exprs[i].is_incremental:
-                needed = True
+            if not self.aggr_exprs[i].is_incremental: 
+                needed = True # we have some memory, we can partition groups into files
 
         if needed:
             grouped_files = []
             currWriter = None
             currgroup = None
-            inpreader = BufferedReader(self.memory_blocks_required() // 2)
+            inpreader = BufferedReader(self.memory_blocks_required() // 2) # half to read, half to write
 
             for buffer in inpreader.iter_buffer(self.input.execute()):
                 for row in buffer:
-                    grp = tuple(group_exec.eval(row0=row) for group_exec in self.compiled.groupby_execs)
+                    grp = tuple(group_exec.eval(row0=row) for group_exec in self.compiled.groupby_execs) # this can be a tuple, multiple groupby things, so ties can be handled
 
-                    if currWriter is None or currgroup is None or currgroup != grp:
-                        if currWriter is not None:
+                    if currWriter is None or currgroup is None or currgroup != grp: # None is for first iteration, if we have a group transition also
+                        if currWriter is not None: # group transition, close
                             currWriter.flush()
                             currWriter.file._close()
-
+                        # either way, open file and buffer writer
                         fle = self._tmp_file("-".join(map(str, grp)))
                         grouped_files.append((grp, fle)) # store actual group to yield at end
                         currWriter = BufferedWriter(fle, self.memory_blocks_required() // 2)
                         currgroup = grp
 
                     currWriter.write(row)
-            if currWriter is not None:
+            if currWriter is not None: # need to flush for the last group because no transition
                 currWriter.flush()
                 currWriter.file._close()
 
         finalNeeded = {}
 
-        for i in range(len(self.aggr_exprs)):
-            if self.aggr_exprs[i].is_incremental:
-                currgroup = None
-                currState = [exec.eval() for exec in self.compiled.aggr_init_execs]
-                for row in self.input.execute():
-                    grp = tuple(group_exec.eval(row0=row) for group_exec in self.compiled.groupby_execs)
+        for i in range(len(self.aggr_exprs)): # all aggregation expressions we have to do (STDEV, AVG, etc)
+            if not needed: # we have not created files
+                currgroup = None # how we start off
+                currState = [exec.eval() for exec in self.compiled.aggr_init_execs] # initing value for each aggregation expression, like 0 for sum.
+                for row in self.input.execute(): # going over each row if we don't have files
+                    grp = tuple(group_exec.eval(row0=row) for group_exec in self.compiled.groupby_execs) # getting the columns we're grouping by
 
-                    if currgroup is None:
+                    if currgroup is None: # just starting off, this is the group we are in
                         currgroup = grp
                     
-                    if currgroup != grp:
-                        finalNeeded["-".join(map(str, currgroup))] = currState
-                        currgroup = grp
-                        currState = [exec.eval() for exec in self.compiled.aggr_init_execs]
-                    curr = self.compiled.aggr_input_execs[i].eval(row0=row)
-                    currState[i] = self.compiled.aggr_add_execs[i].eval(state=currState[i], new_val=curr)
+                    if currgroup != grp: # transition, save old group stats
+                        finalNeeded["-".join(map(str, currgroup))] = currState # ????? gets a bunch of strings and joins with dash
+                        currgroup = grp # update 
+                        currState = [exec.eval() for exec in self.compiled.aggr_init_execs] # if we change group, we need to update state
+                    curr = self.compiled.aggr_input_execs[i].eval(row0=row)  # extracting the value from the column we're aggregating on, like summing this column. same size, so aggr_exprs and init_execs are paired
+                    currState[i] = self.compiled.aggr_add_execs[i].eval(state=currState[i], new_val=curr) # merge the value we just got with the past state
 
-                if currgroup is not None:
-                    finalNeeded["-".join(map(str, currgroup))] = currState
+                if currgroup is not None: # for the last group
+                    finalNeeded["-".join(map(str, currgroup))] = currState # ?????
 
-            else:
-
+            else: # we have grouped files
                 for grp, tmp_file in grouped_files:
-                    tmp_file._open('r')
+                    tmp_file._open('r') # open, read-only
             
                     if ("-".join(map(str, grp)) not in finalNeeded):
-                        finalNeeded["-".join(map(str, grp))] = [exec.eval() for exec in self.compiled.aggr_init_execs]
+                        finalNeeded["-".join(map(str, grp))] = [exec.eval() for exec in self.compiled.aggr_init_execs] # init value for each aggregation expression
                 
-                    def compare_rows(row1, row2):
+                    def compare_rows(row1, row2): # getting the value of the relevant column and comparing
                         val1 = self.compiled.aggr_input_execs[i].eval(row0=row1)
                         val2 = self.compiled.aggr_input_execs[i].eval(row0=row2)
                         return -1 if val1 < val2 else (1 if val1 > val2 else 0)
                     
                 
                     sort_buffer = ExtSortBuffer(
-                        compare=compare_rows,
+                        compare=compare_rows, # sort by the relevant column we are aggregating on, if we want distinct
                         tmp_file_create=lambda level, run: self._tmp_file(f"sort-{i}-{level}-{run}"),
                         tmp_file_delete=lambda f: f._close(),
                         num_memory_blocks=self.memory_blocks_required(),
-                        deduplicate=self.aggr_exprs[i].is_distinct
+                        deduplicate=self.aggr_exprs[i].is_distinct # good, distinct, optional (not incremental implies distinct, but if one aggr expression is distinct, we make files for all of them so then they could be here)
                     )
                 
                 
-                    reader = BufferedReader(1)
+                    reader = BufferedReader(1) # read from the file and add to the sort
                     for buffer in reader.iter_buffer(tmp_file.iter_scan()):
                         for row in buffer:
-                            sort_buffer.add(row)
+                            sort_buffer.add(row) # add row to be sorted for the file, and supposedly deduplicate if applicable
                 
                     previous = None
                     for row in sort_buffer.iter_and_clear():
                         curr = self.compiled.aggr_input_execs[i].eval(row0=row)
-                        if self.aggr_exprs[i].is_distinct:
-                            
-                            if previous is not None and curr == previous:
-                                continue
+                        if self.aggr_exprs[i].is_distinct: # double-check
+                            if previous is not None and curr == previous: # we're in same group (not first row) and had the same last value. we only care about the last value because sorted by what we care about
+                                continue # don't save it, or add it to aggregate statess
                         finalNeeded["-".join(map(str, grp))][i] = self.compiled.aggr_add_execs[i].eval(state=finalNeeded["-".join(map(str, grp))][i], new_val=curr)
                         previous = curr
 
-                    tmp_file._close()
+                    tmp_file._close() # done with this group
             
         for key in finalNeeded.keys():
             finals = [finalizer.eval(state=finalNeeded[key][i]) for i, finalizer in enumerate(self.compiled.aggr_finalize_execs)]
