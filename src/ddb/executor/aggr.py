@@ -173,7 +173,7 @@ class AggrPop(QPop['AggrPop.CompiledProps']):
 
         needed = False
         for i in range(len(self.aggr_exprs)):
-            if not self.aggr_exprs[i].is_incremental: 
+            if not self.aggr_exprs[i].is_incremental(): 
                 needed = True # we have some memory, we can partition groups into files
 
         if needed:
